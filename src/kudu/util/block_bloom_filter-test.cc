@@ -270,4 +270,30 @@ TEST_F(BlockBloomFilterTest, MinSpaceForFpp) {
     }
   }
 }
+
+TEST_F(BlockBloomFilterTest, Or) {
+  BlockBloomFilter* bf1 = CreateBloomFilter(BlockBloomFilter::MinLogSpace(100, 0.01));
+  BlockBloomFilter* bf2 = CreateBloomFilter(BlockBloomFilter::MinLogSpace(100, 0.01));
+
+  for (int i = 60; i < 80; ++i) bf2->Insert(i);
+  for (int i = 0; i < 10; ++i) bf1->Insert(i);
+
+  bf1->Or(*bf2);
+  for (int i = 0; i < 10; ++i) ASSERT_TRUE(bf1->Find(i)) << i;
+  for (int i = 60; i < 80; ++i) ASSERT_TRUE(bf1->Find(i)) << i;
+
+  // Insert another value to aggregated BloomFilter.
+  for (int i = 11; i < 50; ++i) bf1->Insert(i);
+
+  for (int i = 11; i < 50; ++i) ASSERT_TRUE(bf1->Find(i));
+  ASSERT_FALSE(bf1->Find(81));
+
+  // Check that AlwaysFalse() is updated correctly.
+  BlockBloomFilter* bf3 = CreateBloomFilter(BlockBloomFilter::MinLogSpace(100, 0.01));
+  BlockBloomFilter* always_false = CreateBloomFilter(BlockBloomFilter::MinLogSpace(100, 0.01));
+  bf3->Or(*always_false);
+  EXPECT_TRUE(bf3->AlwaysFalse());
+  bf3->Or(*bf2);
+  EXPECT_FALSE(bf3->AlwaysFalse());
+}
 }  // namespace kudu

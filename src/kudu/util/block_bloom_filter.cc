@@ -47,6 +47,7 @@ namespace kudu {
 
 constexpr uint32_t BlockBloomFilter::kRehash[8] __attribute__((aligned(32)));
 const base::CPU BlockBloomFilter::kCpu = base::CPU();
+constexpr BlockBloomFilter* const BlockBloomFilter::kAlwaysTrueFilter;
 
 BlockBloomFilter::BlockBloomFilter(BlockBloomFilterBufferAllocatorIf* buffer_allocator) :
   always_false_(true),
@@ -60,13 +61,16 @@ BlockBloomFilter::BlockBloomFilter(BlockBloomFilterBufferAllocatorIf* buffer_all
   if (has_avx2()) {
     bucket_insert_func_ptr_ = &BlockBloomFilter::BucketInsertAVX2;
     bucket_find_func_ptr_ = &BlockBloomFilter::BucketFindAVX2;
+    or_equal_array_func_ptr_ = &BlockBloomFilter::OrEqualArrayAVX2;
   } else {
     bucket_insert_func_ptr_ = &BlockBloomFilter::BucketInsert;
     bucket_find_func_ptr_ = &BlockBloomFilter::BucketFind;
+    or_equal_array_func_ptr_ = &BlockBloomFilter::OrEqualArray;
   }
 #else
   bucket_insert_func_ptr_ = &BlockBloomFilter::BucketInsert;
   bucket_find_func_ptr_ = &BlockBloomFilter::BucketFind;
+  or_equal_array_func_ptr_ = &BlockBloomFilter::OrEqualArray;
 #endif
 }
 
@@ -257,6 +261,37 @@ bool BlockBloomFilter::operator==(const BlockBloomFilter& rhs) const {
 
 bool BlockBloomFilter::operator!=(const BlockBloomFilter& rhs) const {
   return !(rhs == *this);
+}
+
+void BlockBloomFilter::OrEqualArray(size_t n, const uint8_t* __restrict__ in,
+                                    uint8_t* __restrict__ out) {
+  // The trivial loop out[i] |= in[i] should auto-vectorize with gcc at -O3, but it is not
+  // written in a way that is very friendly to auto-vectorization. Instead, we manually
+  // vectorize, increasing the speed by up to 56x.
+  const __m128i* simd_in = reinterpret_cast<const __m128i*>(in);
+  const __m128i* const simd_in_end = reinterpret_cast<const __m128i*>(in + n);
+  __m128i* simd_out = reinterpret_cast<__m128i*>(out);
+  // in.directory has a size (in bytes) that is a multiple of 32. Since sizeof(__m128i)
+  // == 16, we can do two _mm_or_si128's in each iteration without checking array
+  // bounds.
+  while (simd_in != simd_in_end) {
+    for (int i = 0; i < 2; ++i, ++simd_in, ++simd_out) {
+      _mm_storeu_si128(
+          simd_out, _mm_or_si128(_mm_loadu_si128(simd_out), _mm_loadu_si128(simd_in)));
+    }
+  }
+}
+
+void BlockBloomFilter::Or(const BlockBloomFilter& other) {
+  DCHECK_NE(this, &other);
+  DCHECK_NE(&other, kAlwaysTrueFilter);
+  if (other.AlwaysFalse()) {
+    return;
+  }
+  DCHECK_EQ(directory_size(), other.directory_size());
+  (*or_equal_array_func_ptr_)(directory_size(), reinterpret_cast<uint8_t*>(other.directory_),
+                              reinterpret_cast<uint8_t*>(directory_));
+  always_false_ = false;
 }
 
 shared_ptr<DefaultBlockBloomFilterBufferAllocator>

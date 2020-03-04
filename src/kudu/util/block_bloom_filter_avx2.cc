@@ -75,4 +75,17 @@ void BlockBloomFilter::InsertAvx2(const uint32_t hash) noexcept {
   BucketInsertAVX2(bucket_idx, hash);
 }
 
+void BlockBloomFilter::OrEqualArrayAVX2(size_t n, const uint8_t* __restrict__ in,
+                                        uint8_t* __restrict__ out) {
+  constexpr size_t kAVXRegisterBytes = sizeof(__m256d);
+  DCHECK_EQ(n % kAVXRegisterBytes, 0) << "Invalid Bloom filter directory size";
+  const uint8_t* const in_end = in + n;
+  for (; in != in_end; (in += kAVXRegisterBytes), (out += kAVXRegisterBytes)) {
+    const double* double_in = reinterpret_cast<const double*>(in);
+    double* double_out = reinterpret_cast<double*>(out);
+    _mm256_storeu_pd(double_out,
+                     _mm256_or_pd(_mm256_loadu_pd(double_out), _mm256_loadu_pd(double_in)));
+  }
+}
+
 } // namespace kudu
