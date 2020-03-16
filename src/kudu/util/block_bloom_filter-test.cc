@@ -20,6 +20,7 @@
 #include <cmath> // IWYU pragma: keep
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iosfwd>
 #include <memory>
 #include <unordered_set>
