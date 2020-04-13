@@ -54,19 +54,16 @@ template<DataType Type, EncodingType Encoding> struct TypeEncodingTraits
   static const EncodingType kEncodingType = Encoding;
 };
 
-// Generic, fallback, partial specialization that should work for all
-// fixed size types.
-template<DataType Type>
-struct DataTypeEncodingTraits<Type, PLAIN_ENCODING> {
-
+template<class Builder, class Decoder>
+struct SimpleEncodingTraits {
   static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new PlainBlockBuilder<Type>(options));
+    bb->reset(new Builder(options));
     return Status::OK();
   }
 
   static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new PlainBlockDecoder<Type>(slice));
+                                   CFileIterator* /*parent_cfile_iter*/) {
+    bd->reset(new Decoder(slice));
     return Status::OK();
   }
 };
@@ -74,118 +71,51 @@ struct DataTypeEncodingTraits<Type, PLAIN_ENCODING> {
 // Generic, fallback, partial specialization that should work for all
 // fixed size types.
 template<DataType Type>
-struct DataTypeEncodingTraits<Type, BIT_SHUFFLE> {
+struct DataTypeEncodingTraits<Type, PLAIN_ENCODING>
+    : public SimpleEncodingTraits<PlainBlockBuilder<Type>, PlainBlockDecoder<Type>> {};
 
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new BShufBlockBuilder<Type>(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new BShufBlockDecoder<Type>(slice));
-    return Status::OK();
-  }
-};
+// Generic, fallback, partial specialization that should work for all
+// fixed size types.
+template<DataType Type>
+struct DataTypeEncodingTraits<Type, BIT_SHUFFLE>
+    : public SimpleEncodingTraits<BShufBlockBuilder<Type>, BShufBlockDecoder<Type>> {};
 
 // Template specialization for plain encoded string as they require a
 // specific encoder/decoder.
 template<>
-struct DataTypeEncodingTraits<BINARY, PLAIN_ENCODING> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new BinaryPlainBlockBuilder(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new BinaryPlainBlockDecoder(slice));
-    return Status::OK();
-  }
-};
+struct DataTypeEncodingTraits<BINARY, PLAIN_ENCODING>
+    : public SimpleEncodingTraits<BinaryPlainBlockBuilder, BinaryPlainBlockDecoder> {};
 
 // Template specialization for packed bitmaps
 template<>
-struct DataTypeEncodingTraits<BOOL, PLAIN_ENCODING> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new PlainBitMapBlockBuilder(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new PlainBitMapBlockDecoder(slice));
-    return Status::OK();
-  }
-};
-
+struct DataTypeEncodingTraits<BOOL, PLAIN_ENCODING>
+    : public SimpleEncodingTraits<PlainBitMapBlockBuilder, PlainBitMapBlockDecoder> {};
 
 // Template specialization for RLE encoded bitmaps
 template<>
-struct DataTypeEncodingTraits<BOOL, RLE> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new RleBitMapBlockBuilder(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new RleBitMapBlockDecoder(slice));
-    return Status::OK();
-  }
-};
+struct DataTypeEncodingTraits<BOOL, RLE>
+    : public SimpleEncodingTraits<RleBitMapBlockBuilder, RleBitMapBlockDecoder> {};
 
 // Template specialization for plain encoded string as they require a
 // specific encoder \/decoder.
 template<>
-struct DataTypeEncodingTraits<BINARY, PREFIX_ENCODING> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new BinaryPrefixBlockBuilder(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new BinaryPrefixBlockDecoder(slice));
-    return Status::OK();
-  }
-};
+struct DataTypeEncodingTraits<BINARY, PREFIX_ENCODING>
+    : public SimpleEncodingTraits<BinaryPrefixBlockBuilder, BinaryPrefixBlockDecoder> {};
 
 // Template for dictionary encoding
 template<>
-struct DataTypeEncodingTraits<BINARY, DICT_ENCODING> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new BinaryDictBlockBuilder(options));
-    return Status::OK();
-  }
-
+struct DataTypeEncodingTraits<BINARY, DICT_ENCODING>
+    : public SimpleEncodingTraits<BinaryDictBlockBuilder, BinaryDictBlockDecoder> {
   static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* iter) {
-    bd->reset(new BinaryDictBlockDecoder(slice, iter));
+                                   CFileIterator* parent_cfile_iter) {
+    bd->reset(new BinaryDictBlockDecoder(slice, parent_cfile_iter));
     return Status::OK();
   }
 };
 
 template<DataType IntType>
-struct DataTypeEncodingTraits<IntType, RLE> {
-
-  static Status CreateBlockBuilder(unique_ptr<BlockBuilder>* bb, const WriterOptions* options) {
-    bb->reset(new RleIntBlockBuilder<IntType>(options));
-    return Status::OK();
-  }
-
-  static Status CreateBlockDecoder(unique_ptr<BlockDecoder>* bd, const Slice& slice,
-                                   CFileIterator* /*iter*/) {
-    bd->reset(new RleIntBlockDecoder<IntType>(slice));
-    return Status::OK();
-  }
-};
-
+struct DataTypeEncodingTraits<IntType, RLE>
+    : public SimpleEncodingTraits<RleIntBlockBuilder<IntType>, RleIntBlockDecoder<IntType>> {};
 
 template<typename TypeEncodingTraitsClass>
 TypeEncodingInfo::TypeEncodingInfo(TypeEncodingTraitsClass t)
