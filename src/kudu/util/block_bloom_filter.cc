@@ -45,14 +45,12 @@ DEFINE_bool(disable_blockbloomfilter_avx2, false,
             "that doesn't support AVX2.");
 TAG_FLAG(disable_blockbloomfilter_avx2, hidden);
 
-// Flag used to initialize the static function pointers for the BlockBloomFilter class.
-static std::once_flag g_init_func_ptrs_flag;
-
 namespace kudu {
 
 // Initialize the static member variables from BlockBloomFilter class.
 constexpr uint32_t BlockBloomFilter::kRehash[8] __attribute__((aligned(32)));
 const base::CPU BlockBloomFilter::kCpu = base::CPU();
+std::once_flag BlockBloomFilter::init_func_ptrs_flag;
 // constexpr data member requires initialization in the class declaration.
 // Hence no duplicate initialization in the definition here.
 constexpr BlockBloomFilter* const BlockBloomFilter::kAlwaysTrueFilter;
@@ -88,7 +86,7 @@ BlockBloomFilter::BlockBloomFilter(BlockBloomFilterBufferAllocatorIf* buffer_all
   directory_(nullptr),
   hash_algorithm_(UNKNOWN_HASH),
   hash_seed_(0) {
-  std::call_once(g_init_func_ptrs_flag, InitializeFunctionPtrs);
+  std::call_once(init_func_ptrs_flag, InitializeFunctionPtrs);
 
   DCHECK(bucket_insert_func_ptr_);
   DCHECK(bucket_find_func_ptr_);
@@ -298,7 +296,7 @@ Status BlockBloomFilter::OrEqualArray(size_t n, const uint8_t* __restrict__ in,
     return Status::InvalidArgument(Substitute("Input size $0 not a multiple of 32-bytes", n));
   }
 
-  std::call_once(g_init_func_ptrs_flag, InitializeFunctionPtrs);
+  std::call_once(init_func_ptrs_flag, InitializeFunctionPtrs);
   DCHECK(or_equal_array_func_ptr_);
   (*or_equal_array_func_ptr_)(n, in, out);
   return Status::OK();

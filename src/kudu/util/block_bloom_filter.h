@@ -190,6 +190,9 @@ class BlockBloomFilter {
 
   static const base::CPU kCpu;
 
+  // Flag used to initialize the static function pointers for the BlockBloomFilter class.
+  static std::once_flag init_func_ptrs_flag;
+
   // The BloomFilter is divided up into Buckets and each Bucket comprises of 8 BucketWords of
   // 4 bytes each.
   static constexpr uint64_t kBucketWords = 8;
