@@ -1320,15 +1320,21 @@ bool CatalogManager::IsInitialized() const {
   return state_ == kRunning;
 }
 
+std::shared_ptr<consensus::RaftConsensus> CatalogManager::consensus() const {
+  std::lock_guard<simple_spinlock> l(state_lock_);
+  return state_ == kRunning ? sys_catalog_->tablet_replica()->shared_consensus() :
+                              nullptr;
+}
+
 RaftPeerPB::Role CatalogManager::Role() const {
-  shared_ptr<consensus::RaftConsensus> consensus;
-  {
-    std::lock_guard<simple_spinlock> l(state_lock_);
-    if (state_ == kRunning) {
-      consensus = sys_catalog_->tablet_replica()->shared_consensus();
-    }
-  }
-  return consensus ? consensus->role() : RaftPeerPB::UNKNOWN_ROLE;
+  auto c = consensus();
+  return c ? c->role() : RaftPeerPB::UNKNOWN_ROLE;
+}
+
+pair<RaftPeerPB::Role, RaftPeerPB::MemberType> CatalogManager::GetRoleAndMemberType() const {
+  auto c = consensus();
+  return c ? c->GetRoleAndMemberType() :
+             std::make_pair(RaftPeerPB::UNKNOWN_ROLE, RaftPeerPB::UNKNOWN_MEMBER_TYPE);
 }
 
 void CatalogManager::Shutdown() {
@@ -5437,6 +5443,50 @@ void CatalogManager::ResetTableLocationsCache() {
   VLOG(1) << "table locations cache has been reset";
 }
 
+Status CatalogManager::InitiateMasterChangeConfig(bool add, const HostPort& hp,
+                                                  const std::string& uuid) {
+  auto consensus = master_consensus();
+  if (!consensus) {
+    return Status::IllegalState("Consensus not running");
+  }
+
+  consensus::ChangeConfigRequestPB req;
+  // Request is targeted to itself, the leader master.
+  req.set_dest_uuid(master_->fs_manager()->uuid());
+  req.set_tablet_id(sys_catalog()->tablet_id());
+  req.set_cas_config_opid_index(consensus->CommittedConfig().opid_index());
+  RaftPeerPB* peer = req.mutable_server();
+  peer->set_permanent_uuid(uuid);
+
+  if (add) {
+    req.set_type(consensus::ADD_PEER);
+    *peer->mutable_last_known_addr() = HostPortToPB(hp);
+    // Adding the new master as a NON_VOTER that'll be promoted to VOTER once the tablet
+    // copy is complete and is sufficiently caught up.
+    peer->set_member_type(RaftPeerPB::NON_VOTER);
+    peer->mutable_attrs()->set_promote(true);
+  } else {
+    req.set_type(consensus::REMOVE_PEER);
+  }
+
+  const string add_remove_str = add ? "add" : "remove";
+  LOG(INFO) << Substitute("Initiating ChangeConfig request to $0 master $1: $2",
+                          add_remove_str, hp.ToString(), SecureDebugString(req));
+  boost::optional<TabletServerErrorPB::Code> err_code;
+  Status submission_status = consensus->ChangeConfig(
+      req, [hp, add_remove_str] (const Status& s) {
+        LOG(INFO) << Substitute("Completed ChangeConfig to $0 master $1, result: $2",
+                                add_remove_str, hp.ToString(), s.ToString());
+      },
+      &err_code);
+  RETURN_NOT_OK_PREPEND(
+      submission_status,
+      Substitute("Failed initiating ChangeConfig request to $0 master, error: $1",
+                 add_remove_str,
+                 err_code ? TabletServerErrorPB::Code_Name(*err_code) : "unknown"));
+  return submission_status;
+}
+
 ////////////////////////////////////////////////////////////
 // CatalogManager::TSInfosDict
 ////////////////////////////////////////////////////////////
@@ -5557,6 +5607,7 @@ bool CatalogManager::ScopedLeaderSharedLock::CheckIsInitializedAndIsLeaderOrResp
 INITTED_OR_RESPOND(ConnectToMasterResponsePB);
 INITTED_OR_RESPOND(GetMasterRegistrationResponsePB);
 INITTED_OR_RESPOND(TSHeartbeatResponsePB);
+INITTED_AND_LEADER_OR_RESPOND(AddMasterResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(AlterTableResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(ChangeTServerStateResponsePB);
 INITTED_AND_LEADER_OR_RESPOND(CreateTableResponsePB);

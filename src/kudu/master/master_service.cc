@@ -55,6 +55,7 @@
 #include "kudu/util/flag_tags.h"
 #include "kudu/util/logging.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/pb_util.h"
 #include "kudu/util/scoped_cleanup.h"
@@ -94,6 +95,12 @@ DEFINE_bool(master_support_authz_tokens, true,
             "Whether the master supports generating authz tokens. Used for "
             "testing version compatibility in the client.");
 TAG_FLAG(master_support_authz_tokens, hidden);
+
+DEFINE_bool(master_support_change_config, false,
+            "Whether the master supports adding/removing master servers dynamically.");
+TAG_FLAG(master_support_change_config, hidden);
+TAG_FLAG(master_support_change_config, unsafe);
+
 
 using boost::make_optional;
 using google::protobuf::Message;
@@ -224,6 +231,29 @@ void MasterServiceImpl::ChangeTServerState(const ChangeTServerStateRequestPB* re
   s = server_->ts_manager()->SetTServerState(ts_uuid, to_state,
       req->handle_missing_tserver(), server_->catalog_manager()->sys_catalog());
   if (PREDICT_FALSE(!s.ok())) {
+    rpc->RespondFailure(s);
+    return;
+  }
+  rpc->RespondSuccess();
+}
+
+void MasterServiceImpl::AddMaster(const AddMasterRequestPB* req,
+                                  AddMasterResponsePB* resp,
+                                  rpc::RpcContext* rpc) {
+  if (!FLAGS_master_support_change_config) {
+    rpc->RespondFailure(Status::NotSupported("Adding master is not supported"));
+    return;
+  }
+
+  CatalogManager::ScopedLeaderSharedLock l(server_->catalog_manager());
+  if (!l.CheckIsInitializedAndIsLeaderOrRespond(resp, rpc)) {
+    return;
+  }
+
+  Status s = server_->AddMaster(HostPortFromPB(req->rpc_addr()));
+  if (!s.ok()) {
+    LOG(INFO) << Substitute("Failed adding master $0:$1. $2", req->rpc_addr().host(),
+                            req->rpc_addr().port(), s.ToString());
     rpc->RespondFailure(s);
     return;
   }
@@ -624,7 +654,9 @@ void MasterServiceImpl::GetMasterRegistration(const GetMasterRegistrationRequest
 
   Status s = server_->GetMasterRegistration(resp->mutable_registration());
   CheckRespErrorOrSetUnknown(s, resp);
-  resp->set_role(server_->catalog_manager()->Role());
+  const auto& role_and_member = server_->catalog_manager()->GetRoleAndMemberType();
+  resp->set_role(role_and_member.first);
+  resp->set_member_type(role_and_member.second);
   rpc->RespondSuccess();
 }
 

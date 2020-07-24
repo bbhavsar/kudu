@@ -117,6 +117,9 @@ class Master : public kserver::KuduServer {
     return state_ == kStopped;
   }
 
+  // Adds the master specified by 'hp' by initiating change config request.
+  Status AddMaster(const HostPort& hp);
+
   MaintenanceManager* maintenance_manager() {
     return maintenance_manager_.get();
   }

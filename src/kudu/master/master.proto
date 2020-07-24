@@ -903,6 +903,14 @@ message ChangeTServerStateResponsePB {
   optional MasterErrorPB error = 1;
 }
 
+message AddMasterRequestPB {
+  required HostPortPB rpc_addr = 1;
+}
+
+message AddMasterResponsePB {
+  optional MasterErrorPB error = 1;
+}
+
 // GetMasterRegistrationRequest/Response: get the instance id and
 // HTTP/RPC addresses for this Master server.
 message GetMasterRegistrationRequestPB {
@@ -921,6 +929,9 @@ message GetMasterRegistrationResponsePB {
 
   // Set if there an error retrieving the registration information.
   optional MasterErrorPB error = 4;
+
+  // This server's membership type in the consensus configuration.
+  optional consensus.RaftPeerPB.MemberType member_type = 5;
 }
 
 // ListMastersRequest/Response: get information about all of the known
@@ -1054,6 +1065,13 @@ service MasterService {
   }
   rpc ChangeTServerState(ChangeTServerStateRequestPB) returns
       (ChangeTServerStateResponsePB) {
+    option (kudu.rpc.authz_method) = "AuthorizeSuperUser";
+  }
+
+  // Initiate addition of a new master.
+  // Callers must check with the leader master by listing all masters to check status of the
+  // addition.
+  rpc AddMaster(AddMasterRequestPB) returns (AddMasterResponsePB) {
     option (kudu.rpc.authz_method) = "AuthorizeSuperUser";
   }
 

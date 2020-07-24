@@ -386,6 +386,10 @@ class ExternalMiniCluster : public MiniCluster {
     return opts_.block_manager_type;
   }
 
+  const MonoDelta& start_process_timeout() const {
+    return opts_.start_process_timeout;
+  }
+
   // Wait until the number of registered tablet servers reaches the given count
   // on all of the running masters. Returns Status::TimedOut if the desired
   // count is not achieved with the given timeout.

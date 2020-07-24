@@ -115,9 +115,10 @@ message ServerEntryPB {
   optional NodeInstancePB instance_id = 2;
   optional ServerRegistrationPB registration = 3;
 
-  // If an error has occured earlier in the RPC call, the role
-  // may be not be set.
+  // If an error has occurred earlier in the RPC call, the role and
+  // member_type may be not be set.
   optional consensus.RaftPeerPB.Role role = 4;
+  optional consensus.RaftPeerPB.MemberType member_type = 5;
 }
 
 // A row block in which each row is stored contiguously.

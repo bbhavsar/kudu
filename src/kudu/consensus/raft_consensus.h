@@ -317,6 +317,9 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // Returns the current Raft role of this instance.
   RaftPeerPB::Role role() const;
 
+  // Returns the current Raft role and member type of this instance.
+  std::pair<RaftPeerPB::Role, RaftPeerPB::MemberType> GetRoleAndMemberType() const;
+
   // Returns the current term.
   int64_t CurrentTerm() const;
 

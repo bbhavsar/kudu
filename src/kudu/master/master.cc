@@ -320,6 +320,7 @@ Status GetMasterEntryForHost(const shared_ptr<rpc::Messenger>& messenger,
   }
   e->mutable_registration()->CopyFrom(resp.registration());
   e->set_role(resp.role());
+  e->set_member_type(resp.member_type());
   return Status::OK();
 }
 
@@ -331,6 +332,7 @@ Status Master::ListMasters(vector<ServerEntryPB>* masters) const {
     local_entry.mutable_instance_id()->CopyFrom(catalog_manager_->NodeInstance());
     RETURN_NOT_OK(GetMasterRegistration(local_entry.mutable_registration()));
     local_entry.set_role(RaftPeerPB::LEADER);
+    local_entry.set_member_type(RaftPeerPB::VOTER);
     masters->emplace_back(std::move(local_entry));
     return Status::OK();
   }
@@ -390,6 +392,25 @@ Status Master::GetMasterHostPorts(vector<HostPort>* hostports) const {
     }
   }
   return Status::OK();
+}
+
+Status Master::AddMaster(const HostPort& hp) {
+  // Ensure requested master to be added is not already part of list of masters.
+  vector<HostPort> masters;
+  // Here the check is made against committed config with voters only.
+  RETURN_NOT_OK(GetMasterHostPorts(&masters));
+  if (std::find(masters.begin(), masters.end(), hp) != masters.end()) {
+    return Status::AlreadyPresent("Master already present");
+  }
+
+  // Check whether the master to be added is reachable and fetch its uuid.
+  ServerEntryPB peer_entry;
+  RETURN_NOT_OK(GetMasterEntryForHost(messenger_, hp, &peer_entry));
+  auto peer_uuid = peer_entry.instance_id().permanent_uuid();
+
+  // No early validation for whether a config change is in progress.
+  // If it's in progress, on initiating config change Raft will return error.
+  return catalog_manager()->InitiateMasterChangeConfig(true/* add */, hp, peer_uuid);
 }
 
 } // namespace master

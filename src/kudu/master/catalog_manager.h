@@ -777,6 +777,11 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   // must be initialized before calling this method.
   consensus::RaftPeerPB::Role Role() const;
 
+  // Returns this CatalogManager's role and member type in a consensus configuration.
+  // CatalogManager must be initialized before calling this method.
+  std::pair<consensus::RaftPeerPB::Role, consensus::RaftPeerPB::MemberType>
+      GetRoleAndMemberType() const;
+
   hms::HmsCatalog* hms_catalog() const {
     return hms_catalog_.get();
   }
@@ -802,6 +807,10 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   const std::vector<HostPort>& master_addresses() const {
     return master_addresses_;
   }
+
+  // Add/remove a master specified by 'hp' and 'uuid' by initiating change config request.
+  // Returns status of submission of the request.
+  Status InitiateMasterChangeConfig(bool add, const HostPort& hp, const std::string& uuid);
 
  private:
   // These tests call ElectedAsLeaderCb() directly.
@@ -1089,6 +1098,10 @@ class CatalogManager : public tserver::TabletReplicaLookupIf {
   template<typename RespClass>
   Status WaitForNotificationLogListenerCatchUp(RespClass* resp,
                                                rpc::RpcContext* rpc) WARN_UNUSED_RESULT;
+
+  // Returns the Master tablet's RaftConsensus instance if catalog manager is fully
+  // initialized else a nullptr.
+  std::shared_ptr<consensus::RaftConsensus> consensus() const;
 
   // TODO(unknown): the maps are a little wasteful of RAM, since the TableInfo/TabletInfo
   // objects have a copy of the string key. But STL doesn't make it
