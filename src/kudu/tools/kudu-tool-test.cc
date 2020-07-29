@@ -2225,8 +2225,8 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundSequential) {
       "bench_auto_flush_background_sequential"));
 }
 
-// Run loadgen benchmark in AUTO_FLUSH_BACKGROUND mode, randomized values.
-TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
+// Run loadgen benchmark in AUTO_FLUSH_BACKGROUND mode, randomized keys and values.
+TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandomKeysAndValues) {
   NO_FATALS(RunLoadgen(5,
       {
         "--buffer_flush_watermark_pct=0.125",
@@ -2238,6 +2238,23 @@ TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandom) {
         "--run_scan",
         "--string_len=8",
         "--use_random",
+      },
+      "bench_auto_flush_background_random"));
+}
+
+// Run loadgen benchmark in AUTO_FLUSH_BACKGROUND mode, randomized values only.
+TEST_F(ToolTest, TestLoadgenAutoFlushBackgroundRandomValues) {
+  NO_FATALS(RunLoadgen(5,
+      {
+         "--buffer_flush_watermark_pct=0.125",
+         "--buffer_size_bytes=65536",
+         "--buffers_num=8",
+         // large number of rows are okay since only non-pk columns will use random values.
+         "--num_rows_per_thread=4096",
+         "--num_threads=2",
+         "--run_scan",
+         "--string_len=8",
+         "--use_random_non_pk",
       },
       "bench_auto_flush_background_random"));
 }
