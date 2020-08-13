@@ -19,6 +19,7 @@ package org.apache.kudu.client;
 
 import static org.apache.kudu.client.ExternalConsistencyMode.CLIENT_PROPAGATED;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -47,6 +48,8 @@ import org.slf4j.LoggerFactory;
 import org.apache.kudu.client.AsyncKuduClient.LookupType;
 import org.apache.kudu.util.AsyncUtil;
 import org.apache.kudu.util.Slice;
+
+import com.swrve.ratelimitedlogger.*;
 
 /**
  * An {@code AsyncKuduSession} belongs to a specific {@link AsyncKuduClient}, and represents a
@@ -114,6 +117,11 @@ import org.apache.kudu.util.Slice;
 public class AsyncKuduSession implements SessionConfiguration {
 
   public static final Logger LOG = LoggerFactory.getLogger(AsyncKuduSession.class);
+
+  private static final RateLimitedLog THROTTLED_LOG = RateLimitedLog
+          .withRateLimit(LOG)
+          .maxRate(1).every(Duration.ofMinutes(1))
+          .build();
 
   private final AsyncKuduClient client;
   private final Random randomizer = new Random();
@@ -549,7 +557,7 @@ public class AsyncKuduSession implements SessionConfiguration {
     if (closed) {
       // Ideally this would be a precondition, but that may break existing
       // clients who have grown to rely on this unsafe behavior.
-      LOG.warn("Applying an operation in a closed session; this is unsafe");
+      THROTTLED_LOG.warn("Applying an operation in a closed session; this is unsafe");
     }
 
     // Freeze the row so that the client cannot concurrently modify it while it is in flight.

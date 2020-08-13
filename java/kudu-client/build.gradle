@@ -34,6 +34,8 @@ dependencies {
   compile libs.netty
   compile libs.protobufJava
 
+  compile group: 'com.swrve', name: 'rate-limited-logger', version: '2.0.0'
+
   optional libs.jsr305
   optional libs.yetusAnnotations
 
