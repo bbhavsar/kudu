@@ -17,10 +17,11 @@
 
 #include "kudu/mini-cluster/external_mini_cluster.h"
 
+#include <sys/signal.h>
+#include <sys/wait.h>
+
 #include <algorithm>
-#include <csignal>
 #include <cstdint>
-#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -495,6 +496,9 @@ Status ExternalMiniCluster::StartMasters() {
 
   vector<string> flags;
   flags.emplace_back("--rpc_reuseport=true");
+  // Setting --master_addresses flag for a single master configuration is now supported but not
+  // mandatory. Not setting the flag helps test existing kudu deployments that don't specify
+  // the --master_addresses flag for single master configuration.
   if (num_masters > 1) {
     flags.emplace_back(Substitute("--master_addresses=$0",
                                   HostPort::ToCommaSeparatedString(master_rpc_addrs)));

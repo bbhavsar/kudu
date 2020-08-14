@@ -21,6 +21,7 @@
 
 #include "kudu/server/server_base_options.h"
 #include "kudu/util/net/net_util.h"
+#include "kudu/util/status.h"
 
 namespace kudu {
 namespace master {
@@ -34,6 +35,10 @@ struct MasterOptions : public server::ServerBaseOptions {
   std::vector<HostPort> master_addresses;
 
   bool IsDistributed() const;
+
+  // For a single master configuration get the only master address in 'hp', if available.
+  // Otherwise NOT_FOUND error.
+  Status GetTheOnlyMasterAddress(HostPort* hp) const;
 };
 
 } // namespace master

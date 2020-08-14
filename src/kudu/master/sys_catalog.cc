@@ -286,6 +286,13 @@ Status SysCatalogTable::CreateNew(FsManager *fs_manager) {
     RaftPeerPB* peer = config.add_peers();
     peer->set_permanent_uuid(fs_manager->uuid());
     peer->set_member_type(RaftPeerPB::VOTER);
+    // Set 'last_known_addr' if master address is specified for a single master configuration.
+    // This helps in migrating to multiple masters.
+    HostPort hp;
+    Status s = master_->opts().GetTheOnlyMasterAddress(&hp);
+    if (s.ok()) {
+      *peer->mutable_last_known_addr() = HostPortToPB(hp);
+    }
   }
 
   string tablet_id = metadata->tablet_id();
