@@ -51,9 +51,7 @@
 #include "kudu/util/test_util.h"
 
 using kudu::client::KuduClient;
-using kudu::client::KuduClientBuilder;
 using kudu::client::KuduColumnSchema;
-using kudu::client::KuduScanner;
 using kudu::client::KuduSchema;
 using kudu::client::KuduSchemaBuilder;
 using kudu::client::KuduTable;
