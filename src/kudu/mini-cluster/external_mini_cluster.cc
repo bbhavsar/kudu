@@ -17,11 +17,10 @@
 
 #include "kudu/mini-cluster/external_mini_cluster.h"
 
-#include <sys/signal.h>
-#include <sys/wait.h>
-
 #include <algorithm>
+#include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <memory>
