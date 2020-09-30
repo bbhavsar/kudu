@@ -836,6 +836,17 @@ Status LeaderMasterProxy::SyncRpc(const Req& req,
 // Explicit specializations for callers outside this compilation unit.
 template
 Status LeaderMasterProxy::SyncRpc(
+    const master::AddMasterRequestPB& req,
+    master::AddMasterResponsePB* resp,
+    string func_name,
+    const std::function<void(MasterServiceProxy*,
+                             const master::AddMasterRequestPB&,
+                             master::AddMasterResponsePB*,
+                             RpcController*,
+                             const ResponseCallback&)>& func);
+
+template
+Status LeaderMasterProxy::SyncRpc(
     const master::ChangeTServerStateRequestPB& req,
     master::ChangeTServerStateResponsePB* resp,
     string func_name,

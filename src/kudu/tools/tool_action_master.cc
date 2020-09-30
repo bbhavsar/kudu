@@ -51,12 +51,15 @@
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/init.h"
 #include "kudu/util/monotime.h"
+#include "kudu/util/net/net_util.h"
 #include "kudu/util/status.h"
 
 DECLARE_bool(force);
 DECLARE_int64(timeout_ms);
 DECLARE_string(columns);
 
+using kudu::master::AddMasterRequestPB;
+using kudu::master::AddMasterResponsePB;
 using kudu::master::ConnectToMasterRequestPB;
 using kudu::master::ConnectToMasterResponsePB;
 using kudu::master::ListMastersRequestPB;
@@ -118,6 +121,28 @@ Status MasterStatus(const RunnerContext& context) {
 Status MasterTimestamp(const RunnerContext& context) {
   const string& address = FindOrDie(context.required_args, kMasterAddressArg);
   return PrintServerTimestamp(address, Master::kDefaultPort);
+}
+
+Status AddMasterChangeConfig(const RunnerContext& context) {
+  const string& new_master_address = FindOrDie(context.required_args, kMasterAddressArg);
+
+  LeaderMasterProxy proxy;
+  RETURN_NOT_OK(proxy.Init(context));
+
+  AddMasterRequestPB req;
+  AddMasterResponsePB resp;
+  HostPort hp;
+  RETURN_NOT_OK(hp.ParseString(new_master_address, Master::kDefaultPort));
+  *req.mutable_rpc_addr() = HostPortToPB(hp);
+
+  RETURN_NOT_OK((proxy.SyncRpc<AddMasterRequestPB, AddMasterResponsePB>(
+      req, &resp, "AddMaster", &MasterServiceProxy::AddMasterAsync)));
+
+  if (resp.has_error()) {
+    return StatusFromPB(resp.error().status());
+  }
+
+  return Status::OK();
 }
 
 Status ListMasters(const RunnerContext& context) {
@@ -433,6 +458,15 @@ unique_ptr<Mode> BuildMasterMode() {
         .AddOptionalParameter("timeout_ms")
         .Build();
     builder.AddAction(std::move(list_masters));
+  }
+  {
+    unique_ptr<Action> add_master =
+        ActionBuilder("add_master", &AddMasterChangeConfig)
+        .Description("Add a master to the Raft configuration of the Kudu cluster")
+        .AddRequiredParameter({ kMasterAddressesArg, kMasterAddressesArgDesc })
+        .AddRequiredParameter({ kMasterAddressArg, kMasterAddressDesc })
+        .Build();
+    builder.AddAction(std::move(add_master));
   }
 
   return builder.Build();

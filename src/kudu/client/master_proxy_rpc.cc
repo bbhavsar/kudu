@@ -46,6 +46,8 @@ using strings::Substitute;
 
 namespace kudu {
 
+using master::AddMasterRequestPB;
+using master::AddMasterResponsePB;
 using master::AlterTableRequestPB;
 using master::AlterTableResponsePB;
 using master::ChangeTServerStateRequestPB;
@@ -283,6 +285,7 @@ bool AsyncLeaderMasterRpc<ReqClass, RespClass>::RetryOrReconnectIfNecessary(
   return false;
 }
 
+template class AsyncLeaderMasterRpc<AddMasterRequestPB, AddMasterResponsePB>;
 template class AsyncLeaderMasterRpc<ChangeTServerStateRequestPB, ChangeTServerStateResponsePB>;
 template class AsyncLeaderMasterRpc<CreateTableRequestPB, CreateTableResponsePB>;
 template class AsyncLeaderMasterRpc<IsCreateTableDoneRequestPB, IsCreateTableDoneResponsePB>;

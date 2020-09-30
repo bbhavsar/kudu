@@ -50,6 +50,7 @@
 #include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/mini-cluster/mini_cluster.h"
 #include "kudu/rpc/rpc_controller.h"
+#include "kudu/tools/tool_test_util.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
@@ -252,8 +253,8 @@ class DynamicMultiMasterTest : public KuduTest {
     ASSERT_EQ(orig_num_masters_, resp.masters_size());
   }
 
-  // Adds the specified master to the cluster returning the appropriate error Status for negative
-  // test cases.
+  // Adds the specified master to the cluster returning the appropriate RPC error Status
+  // for negative test cases.
   Status AddMasterToCluster(const HostPort& master) {
     auto add_master = [&] (int leader_master_idx) {
       AddMasterRequestPB req;
@@ -270,6 +271,21 @@ class DynamicMultiMasterTest : public KuduTest {
 
     RETURN_NOT_OK(RunLeaderMasterRPC(add_master));
     return cluster_->AddMaster(new_master_);
+  }
+
+  // Adds the specified master to the cluster using the CLI tool.
+  // Returns generic RuntimeError() on failure with the actual error in the optional 'err'
+  // output parameter.
+  Status AddMasterToClusterUsingCLITool(const HostPort& master, string* err = nullptr) {
+    auto hps = cluster_->master_rpc_addrs();
+    vector<string> addresses;
+    addresses.reserve(hps.size());
+    for (const auto& hp : hps) {
+      addresses.emplace_back(hp.ToString());
+    }
+
+    return tools::RunKuduTool({"master", "add_master", JoinStrings(addresses, ","),
+                               master.ToString()}, nullptr, err);
   }
 
   // Verify one of the 'expected_roles' and 'expected_member_type' of the new master by
@@ -333,7 +349,7 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWAL) {
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
   NO_FATALS(StartNewMaster(master_hps));
-  ASSERT_OK(AddMasterToCluster(reserved_hp_));
+  ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_));
 
   // Newly added master will be caught up from WAL itself without requiring tablet copy
   // since the system catalog is fresh with a single table.
@@ -362,9 +378,10 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWAL) {
 
   // Adding the same master again should return an error.
   {
-    Status s = AddMasterToCluster(reserved_hp_);
-    ASSERT_TRUE(s.IsRemoteError());
-    ASSERT_STR_CONTAINS(s.message().ToString(), "Master already present");
+    string err;
+    Status s = AddMasterToClusterUsingCLITool(reserved_hp_, &err);
+    ASSERT_TRUE(s.IsRuntimeError());
+    ASSERT_STR_CONTAINS(err, "Master already present");
   }
 
   // Adding one of the former masters should return an error.
