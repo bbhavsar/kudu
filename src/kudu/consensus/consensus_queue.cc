@@ -71,6 +71,12 @@ DEFINE_int32(consensus_inject_latency_ms_in_notifications, 0,
 TAG_FLAG(consensus_inject_latency_ms_in_notifications, hidden);
 TAG_FLAG(consensus_inject_latency_ms_in_notifications, unsafe);
 
+DEFINE_bool(consensus_allow_status_msg_for_failed_peer, false,
+            "Allows status only Raft messages to be sent to a peer in FAILED_UNRECOVERABLE state.");
+TAG_FLAG(consensus_allow_status_msg_for_failed_peer, hidden);
+TAG_FLAG(consensus_allow_status_msg_for_failed_peer, unsafe);
+
+
 DECLARE_bool(raft_prepare_replacement_before_eviction);
 DECLARE_bool(safe_time_advancement_without_writes);
 DECLARE_int32(consensus_rpc_timeout_ms);
@@ -690,8 +696,14 @@ Status PeerMessageQueue::RequestForPeer(const string& uuid,
   // If we've never communicated with the peer, we don't know what messages to
   // send, so we'll send a status-only request. Otherwise, we grab requests
   // from the log starting at the last_received point.
-  if (peer_copy.last_exchange_status != PeerStatus::NEW) {
-
+  //
+  // Tablet copying of system catalogs in new masters is done externally.
+  // As such if the new master is determined to be in FAILED_UNRECOVERABLE state, no messages
+  // are sent to it and the new master remains in FAILED_UNRECOVERABLE state despite an
+  // up to date system catalog WAL. So if FLAGS_consensus_allow_status_msg_for_failed_peer is set
+  // allow sending status only messages to the peer.
+  if (peer_copy.last_exchange_status != PeerStatus::NEW &&
+      (!FLAGS_consensus_allow_status_msg_for_failed_peer || peer_copy.wal_catchup_possible)) {
     // The batch of messages to send to the peer.
     vector<ReplicateRefPtr> messages;
     int64_t max_batch_size = FLAGS_consensus_max_batch_size_bytes - request->ByteSizeLong();

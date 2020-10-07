@@ -401,7 +401,7 @@ Status SysCatalogTable::CreateDistributedConfig(const MasterOptions& options,
   }
 
   RETURN_NOT_OK(consensus::VerifyRaftConfig(resolved_config));
-  VLOG(1) << "Distributed Raft configuration: " << SecureShortDebugString(resolved_config);
+  LOG(INFO) << "Distributed Raft configuration: " << SecureShortDebugString(resolved_config);
 
   *committed_config = resolved_config;
   return Status::OK();

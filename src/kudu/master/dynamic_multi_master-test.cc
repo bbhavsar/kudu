@@ -29,6 +29,7 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
+
 #include "kudu/client/client-test-util.h"
 #include "kudu/client/client.h"
 #include "kudu/client/schema.h"
@@ -50,6 +51,7 @@
 #include "kudu/mini-cluster/external_mini_cluster.h"
 #include "kudu/mini-cluster/mini_cluster.h"
 #include "kudu/rpc/rpc_controller.h"
+#include "kudu/tools/tool_test_util.h"
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/net/net_util.h"
@@ -127,6 +129,52 @@ class DynamicMultiMasterTest : public KuduTest {
     ASSERT_OK(cluster_->Start());
     ASSERT_OK(cluster_->WaitForTabletServerCount(cluster_->num_tablet_servers(),
                                                  MonoDelta::FromSeconds(5)));
+  }
+
+  // Bring up a cluster with bunch of tables and ensure the system catalog WAL
+  // has been GC'ed.
+  // Out parameter 'master_hps' returns the HostPort of the masters in the original
+  // cluster.
+  void StartClusterWithSysCatalogGCed(vector<HostPort>* master_hps,
+                                      const vector<string>& extra_flags = {}) {
+    // Using low values of log flush threshold and segment size to trigger GC of the
+    // sys catalog WAL
+    vector<string> flags = {"--master_support_change_config", "--flush_threshold_secs=1",
+                            "--log_segment_size_mb=1"};
+    flags.insert(flags.end(), extra_flags.begin(), extra_flags.end());
+    NO_FATALS(StartCluster(flags));
+
+    // Verify that masters are running as VOTERs and collect their addresses to be used
+    // for starting the new master.
+    NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, master_hps));
+
+    auto get_sys_catalog_wal_gc_count = [&] {
+      int64_t sys_catalog_wal_gc_count = 0;
+      CHECK_OK(itest::GetInt64Metric(cluster_->master(0)->bound_http_hostport(),
+                                     &METRIC_ENTITY_tablet,
+                                     master::SysCatalogTable::kSysCatalogTabletId,
+                                     &METRIC_log_gc_duration,
+                                     "total_count",
+                                     &sys_catalog_wal_gc_count));
+      return sys_catalog_wal_gc_count;
+    };
+    auto orig_gc_count = get_sys_catalog_wal_gc_count();
+
+    // Create a bunch of tables to ensure sys catalog WAL gets GC'ed.
+    // Need to create around 1k tables even with lowest flush threshold and log segment size.
+    for (int i = 1; i < 1000; i++) {
+      string table_name = Substitute("Table.$0.$1", CURRENT_TEST_NAME(), std::to_string(i));
+      ASSERT_OK(CreateTable(cluster_.get(), table_name));
+    }
+
+    int64_t time_left_to_sleep_msecs = 2000;
+    while (time_left_to_sleep_msecs > 0 && orig_gc_count == get_sys_catalog_wal_gc_count()) {
+      static const MonoDelta kSleepDuration = MonoDelta::FromMilliseconds(100);
+      SleepFor(kSleepDuration);
+      time_left_to_sleep_msecs -= kSleepDuration.ToMilliseconds();
+    }
+    ASSERT_GT(time_left_to_sleep_msecs, 0)
+      << "Timed out waiting for system catalog WAL to be GC'ed";
   }
 
   // Functor that takes a leader_master_idx and runs the desired master RPC against
@@ -286,6 +334,45 @@ class DynamicMultiMasterTest : public KuduTest {
     ASSERT_EQ(expected_member_type, resp.member_type());
   }
 
+  void VerifyNewMasterInFailedUnrecoverableState() {
+    // Verify FAILED_UNRECOVERABLE health error about the new master that can't be caught up
+    // from WAL. This health state update may take some round trips between the masters and
+    // hence wrapping it under ASSERT_EVENTUALLY.
+    ASSERT_EVENTUALLY([&] {
+      // GetConsensusState() RPC can be made to any master and not necessarily the leader master.
+      int leader_master_idx;
+      ASSERT_OK(cluster_->GetLeaderMasterIndex(&leader_master_idx));
+      auto leader_master_addr = cluster_->master(leader_master_idx)->bound_rpc_addr();
+      consensus::ConsensusServiceProxy consensus_proxy(cluster_->messenger(), leader_master_addr,
+                                                       leader_master_addr.host());
+      consensus::GetConsensusStateRequestPB req;
+      consensus::GetConsensusStateResponsePB resp;
+      RpcController rpc;
+      req.set_dest_uuid(cluster_->master(leader_master_idx)->uuid());
+      req.set_report_health(consensus::INCLUDE_HEALTH_REPORT);
+      ASSERT_OK(consensus_proxy.GetConsensusState(req, &resp, &rpc));
+      ASSERT_FALSE(resp.has_error());
+      ASSERT_EQ(1, resp.tablets_size());
+
+      // Lookup the new_master from the consensus state of the system catalog.
+      const auto& sys_catalog = resp.tablets(0);
+      ASSERT_EQ(master::SysCatalogTable::kSysCatalogTabletId, sys_catalog.tablet_id());
+      const auto& cstate = sys_catalog.cstate();
+      const auto& config = cstate.has_pending_config() ?
+                           cstate.pending_config() : cstate.committed_config();
+      ASSERT_EQ(orig_num_masters_ + 1, config.peers_size());
+      int num_new_masters_found = 0;
+      for (const auto& peer : config.peers()) {
+        if (peer.permanent_uuid() == new_master_->uuid()) {
+          ASSERT_EQ(consensus::HealthReportPB::FAILED_UNRECOVERABLE,
+                    peer.health_report().overall_health());
+          num_new_masters_found++;
+        }
+      }
+      ASSERT_EQ(1, num_new_masters_found);
+    });
+  }
+
  protected:
   // Tracks the current number of masters in the cluster
   int orig_num_masters_;
@@ -337,7 +424,7 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWAL) {
 
   // Newly added master will be caught up from WAL itself without requiring tablet copy
   // since the system catalog is fresh with a single table.
-  // Catching up from WAL and promotion to VOTER will not be instantly after adding the
+  // Catching up from WAL and promotion to VOTER will not be instant after adding the
   // new master. Hence using ASSERT_EVENTUALLY.
   ASSERT_EVENTUALLY([&] {
     ListMastersResponsePB resp;
@@ -440,41 +527,10 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWAL) {
 TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWALNotPossible) {
   SKIP_IF_SLOW_NOT_ALLOWED();
 
-  // Using low values of log flush threshold and segment size to trigger GC of the sys catalog WAL.
-  NO_FATALS(StartCluster({"--master_support_change_config", "--flush_threshold_secs=1",
-                          "--log_segment_size_mb=1"}));
-
-  // Verify that masters are running as VOTERs and collect their addresses to be used
-  // for starting the new master.
+  // Bring up a cluster with bunch of tables and ensure the system catalog WAL
+  // has been GC'ed.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
-
-  auto get_sys_catalog_wal_gc_count = [&] {
-    int64_t sys_catalog_wal_gc_count = 0;
-    CHECK_OK(itest::GetInt64Metric(cluster_->master(0)->bound_http_hostport(),
-                                   &METRIC_ENTITY_tablet,
-                                   master::SysCatalogTable::kSysCatalogTabletId,
-                                   &METRIC_log_gc_duration,
-                                   "total_count",
-                                   &sys_catalog_wal_gc_count));
-    return sys_catalog_wal_gc_count;
-  };
-  auto orig_gc_count = get_sys_catalog_wal_gc_count();
-
-  // Create a bunch of tables to ensure sys catalog WAL gets GC'ed.
-  // Need to create around 1k tables even with lowest flush threshold and log segment size.
-  for (int i = 1; i < 1000; i++) {
-    string table_name = "Table.TestAddMasterCatchupFromWALNotPossible." + std::to_string(i);
-    ASSERT_OK(CreateTable(cluster_.get(), table_name));
-  }
-
-  int64_t time_left_to_sleep_msecs = 2000;
-  while (time_left_to_sleep_msecs > 0 && orig_gc_count == get_sys_catalog_wal_gc_count()) {
-    static const MonoDelta kSleepDuration = MonoDelta::FromMilliseconds(100);
-    SleepFor(kSleepDuration);
-    time_left_to_sleep_msecs -= kSleepDuration.ToMilliseconds();
-  }
-  ASSERT_GT(time_left_to_sleep_msecs, 0) << "Timed out waiting for system catalog WAL to be GC'ed";
+  NO_FATALS(StartClusterWithSysCatalogGCed(&master_hps));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
@@ -497,44 +553,94 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWALNotPossib
   }
 
   // Double check by directly contacting the new master.
-  VerifyNewMasterDirectly({ consensus::RaftPeerPB::LEARNER }, consensus::RaftPeerPB::NON_VOTER);
+  NO_FATALS(VerifyNewMasterDirectly({ consensus::RaftPeerPB::LEARNER },
+                                    consensus::RaftPeerPB::NON_VOTER));
 
-  // Verify FAILED_UNRECOVERABLE health error about the new master that can't be caught up
-  // from WAL. This health state update may take some round trips between the masters and
-  // hence wrapping it under ASSERT_EVENTUALLY.
-  ASSERT_EVENTUALLY([&] {
-    // GetConsensusState() RPC can be made to any master and not necessarily the leader master.
-    int leader_master_idx;
-    ASSERT_OK(cluster_->GetLeaderMasterIndex(&leader_master_idx));
-    auto leader_master_addr = cluster_->master(leader_master_idx)->bound_rpc_addr();
-    consensus::ConsensusServiceProxy consensus_proxy(cluster_->messenger(), leader_master_addr,
-                                                     leader_master_addr.host());
-    consensus::GetConsensusStateRequestPB req;
-    consensus::GetConsensusStateResponsePB resp;
-    RpcController rpc;
-    req.set_dest_uuid(cluster_->master(leader_master_idx)->uuid());
-    req.set_report_health(consensus::INCLUDE_HEALTH_REPORT);
-    ASSERT_OK(consensus_proxy.GetConsensusState(req, &resp, &rpc));
-    ASSERT_FALSE(resp.has_error());
-    ASSERT_EQ(1, resp.tablets_size());
+  // Verify new master is in FAILED_UNRECOVERABLE state.
+  NO_FATALS(VerifyNewMasterInFailedUnrecoverableState());
+}
 
-    // Lookup the new_master from the consensus state of the system catalog.
-    const auto& sys_catalog = resp.tablets(0);
-    ASSERT_EQ(master::SysCatalogTable::kSysCatalogTabletId, sys_catalog.tablet_id());
-    const auto& cstate = sys_catalog.cstate();
-    const auto& config = cstate.has_pending_config() ?
-        cstate.pending_config() : cstate.committed_config();
-    ASSERT_EQ(orig_num_masters_ + 1, config.peers_size());
-    int num_new_masters_found = 0;
-    for (const auto& peer : config.peers()) {
-      if (peer.permanent_uuid() == new_master_->uuid()) {
-        ASSERT_EQ(consensus::HealthReportPB::FAILED_UNRECOVERABLE,
-                  peer.health_report().overall_health());
-        num_new_masters_found++;
-      }
+// This test goes through the workflow required to copy system catalog to the newly added master.
+TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterTabletCopying) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  vector<HostPort> master_hps;
+  NO_FATALS(StartClusterWithSysCatalogGCed(&master_hps,
+                                           {"--consensus_allow_status_msg_for_failed_peer"}));
+  // Bring up the new master and add to the cluster.
+  master_hps.emplace_back(reserved_hp_);
+  NO_FATALS(StartNewMaster(master_hps));
+  ASSERT_OK(AddMasterToCluster(reserved_hp_));
+
+  // Newly added master will be added to the master Raft config but won't be caught up
+  // from the WAL and hence remain as a NON_VOTER.
+  ListMastersResponsePB list_resp;
+  NO_FATALS(RunListMasters(&list_resp));
+  ASSERT_EQ(orig_num_masters_ + 1, list_resp.masters_size());
+
+  for (const auto& master : list_resp.masters()) {
+    ASSERT_EQ(1, master.registration().rpc_addresses_size());
+    auto hp = HostPortFromPB(master.registration().rpc_addresses(0));
+    if (hp == reserved_hp_) {
+      ASSERT_EQ(consensus::RaftPeerPB::NON_VOTER, master.member_type());
+      ASSERT_TRUE(master.role() == consensus::RaftPeerPB::LEARNER);
     }
-    ASSERT_EQ(1, num_new_masters_found);
+  }
+
+  // Double check by directly contacting the new master.
+  NO_FATALS(VerifyNewMasterDirectly({ consensus::RaftPeerPB::LEARNER },
+                                    consensus::RaftPeerPB::NON_VOTER));
+
+  // Verify new master is in FAILED_UNRECOVERABLE state.
+  NO_FATALS(VerifyNewMasterInFailedUnrecoverableState());
+
+  // Without system catalog copy, the new master will remain in the FAILED_UNRECOVERABLE state.
+  // So lets proceed with the tablet copy process for system catalog.
+  // Shutdown the new master
+  LOG(INFO) << "Shutting down the new master";
+  new_master_->Shutdown();
+
+  LOG(INFO) << "Deleting the system catalog";
+  // Delete sys catalog on local master
+  ASSERT_OK(tools::RunKuduTool({"local_replica", "delete",
+                                master::SysCatalogTable::kSysCatalogTabletId,
+                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                "-fs_wal_dir=" + new_master_->wal_dir(),
+                                "-clean_unsafe"}));
+
+
+  // Copy from remote system catalog
+  LOG(INFO) << "Copying from remote master: "
+    << cluster_->master(0)->bound_rpc_hostport().ToString();
+  ASSERT_OK(tools::RunKuduTool({"local_replica", "copy_from_remote",
+                                master::SysCatalogTable::kSysCatalogTabletId,
+                                cluster_->master(0)->bound_rpc_hostport().ToString(),
+                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                "-fs_wal_dir=" + new_master_->wal_dir()}));
+
+  LOG(INFO) << "Restarting the new master";
+  ASSERT_OK(new_master_->Restart());
+
+  // Wait for the new master to be up and running and the leader master to send status only Raft
+  // message to allow the new master to be considered caught up and promoted to be being a VOTER.
+  ASSERT_EVENTUALLY([&] {
+    VerifyNewMasterDirectly({ consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
+                            consensus::RaftPeerPB::VOTER);
   });
+
+  // Verify the same state from the leader master
+  NO_FATALS(RunListMasters(&list_resp));
+  ASSERT_EQ(orig_num_masters_ + 1, list_resp.masters_size());
+
+  for (const auto &master : list_resp.masters()) {
+    ASSERT_EQ(1, master.registration().rpc_addresses_size());
+    auto hp = HostPortFromPB(master.registration().rpc_addresses(0));
+    if (hp == reserved_hp_) {
+      ASSERT_EQ(consensus::RaftPeerPB::VOTER, master.member_type());
+      ASSERT_TRUE(master.role() == consensus::RaftPeerPB::FOLLOWER ||
+                  master.role() == consensus::RaftPeerPB::LEADER);
+    }
+  }
 }
 
 // Test that brings up a single master cluster with 'last_known_addr' not populated by
