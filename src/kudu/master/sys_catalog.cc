@@ -345,6 +345,11 @@ Status SysCatalogTable::CreateNew(FsManager *fs_manager) {
     HostPort hp;
     if (master_->opts().GetTheOnlyMasterAddress(&hp).ok()) {
       *peer->mutable_last_known_addr() = HostPortToPB(hp);
+      if (FLAGS_master_support_change_config &&
+          FLAGS_master_address_add_new_master == hp.ToString()) {
+        LOG(INFO) << "Initializing as NON_VOTER";
+        peer->set_member_type(RaftPeerPB::NON_VOTER);
+      }
     }
   }
 
@@ -401,7 +406,7 @@ Status SysCatalogTable::CreateDistributedConfig(const MasterOptions& options,
   }
 
   RETURN_NOT_OK(consensus::VerifyRaftConfig(resolved_config));
-  VLOG(1) << "Distributed Raft configuration: " << SecureShortDebugString(resolved_config);
+  LOG(INFO) << "Distributed Raft configuration: " << SecureShortDebugString(resolved_config);
 
   *committed_config = resolved_config;
   return Status::OK();

@@ -328,7 +328,7 @@ class ParameterizedDynamicMultiMasterTest : public DynamicMultiMasterTest,
 
 INSTANTIATE_TEST_CASE_P(, ParameterizedDynamicMultiMasterTest,
                         // Initial number of masters in the cluster before adding a new master
-                        ::testing::Values(1, 2));
+                        ::testing::Values(1));
 
 // This test starts a cluster, creates a table and then adds a new master.
 // For a system catalog with little data, the new master can be caught up from WAL and
@@ -552,6 +552,84 @@ TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterCatchupFromWALNotPossib
     }
     ASSERT_EQ(1, num_new_masters_found);
   });
+}
+
+
+TEST_P(ParameterizedDynamicMultiMasterTest, TestAddMasterTabletCopying) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  // Using low values of log flush threshold and segment size to trigger GC of the sys catalog WAL.
+  NO_FATALS(StartCluster({"--master_support_change_config", "--flush_threshold_secs=1",
+                          "--log_segment_size_mb=1"}));
+
+  // Verify that masters are running as VOTERs and collect their addresses to be used
+  // for starting the new master.
+  vector<HostPort> master_hps;
+  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+
+  auto get_sys_catalog_wal_gc_count = [&] {
+    int64_t sys_catalog_wal_gc_count = 0;
+        CHECK_OK(itest::GetInt64Metric(cluster_->master(0)->bound_http_hostport(),
+                                       &METRIC_ENTITY_tablet,
+                                       master::SysCatalogTable::kSysCatalogTabletId,
+                                       &METRIC_log_gc_duration,
+                                       "total_count",
+                                       &sys_catalog_wal_gc_count));
+    return sys_catalog_wal_gc_count;
+  };
+  auto orig_gc_count = get_sys_catalog_wal_gc_count();
+
+  // Create a bunch of tables to ensure sys catalog WAL gets GC'ed.
+  // Need to create around 1k tables even with lowest flush threshold and log segment size.
+  for (int i = 1; i < 1000; i++) {
+    string table_name = "Table.TestAddMasterCatchupFromWALNotPossible." + std::to_string(i);
+    ASSERT_OK(CreateTable(cluster_.get(), table_name));
+  }
+
+  int64_t time_left_to_sleep_msecs = 2000;
+  while (time_left_to_sleep_msecs > 0 && orig_gc_count == get_sys_catalog_wal_gc_count()) {
+    static const MonoDelta kSleepDuration = MonoDelta::FromMilliseconds(100);
+    SleepFor(kSleepDuration);
+    time_left_to_sleep_msecs -= kSleepDuration.ToMilliseconds();
+  }
+  ASSERT_GT(time_left_to_sleep_msecs, 0) << "Timed out waiting for system catalog WAL to be GC'ed";
+
+  // Bring up the new master and add to the cluster.
+  master_hps.emplace_back(reserved_hp_);
+  NO_FATALS(StartNewMaster(master_hps));
+
+  LOG(INFO) << "Adding master to cluster";
+  ASSERT_OK(AddMasterToCluster(reserved_hp_));
+
+  // Shutdown the new master
+  SleepFor(MonoDelta::FromSeconds(5));
+  LOG(INFO) << "Shutting down the new master";
+  new_master_->Shutdown();
+
+  LOG(INFO) << "Deleting the sys catalog";
+  // Delete sys catalog on local master
+  ASSERT_OK(tools::RunKuduTool({"local_replica", "delete", master::SysCatalogTable::kSysCatalogTabletId,
+                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                "-fs_wal_dir=" + new_master_->wal_dir(),
+                                "-clean_unsafe"}));
+
+
+  // Copy from remote sys catalog
+  LOG(INFO) << "Copy from remote";
+  ASSERT_OK(tools::RunKuduTool({"local_replica", "copy_from_remote",
+                                master::SysCatalogTable::kSysCatalogTabletId,
+                                cluster_->master(0)->bound_rpc_hostport().ToString(),
+                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                "-fs_wal_dir=" + new_master_->wal_dir()}));
+
+  LOG(INFO) << "Restarting the new master";
+  ASSERT_OK(new_master_->Restart());
+
+  SleepFor(MonoDelta::FromSeconds(10));
+
+  // Double check by directly contacting the new master.
+  VerifyNewMasterDirectly({ consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
+                          consensus::RaftPeerPB::VOTER);
 }
 
 // Test that brings up a single master cluster with 'last_known_addr' not populated by

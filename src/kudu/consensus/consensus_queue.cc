@@ -689,7 +689,11 @@ Status PeerMessageQueue::RequestForPeer(const string& uuid,
   // If we've never communicated with the peer, we don't know what messages to
   // send, so we'll send a status-only request. Otherwise, we grab requests
   // from the log starting at the last_received point.
-  if (peer_copy.last_exchange_status != PeerStatus::NEW) {
+  // HACK: Need to come up with better solution to allow sending status heartbeat
+  // messages even if the leader master determined one of the masters to be in
+  // FAILED_UNRECOVERABLE error due to !wal_catch_possible error.
+  if (peer_copy.last_exchange_status != PeerStatus::NEW &&
+      peer_copy.wal_catchup_possible) {
 
     // The batch of messages to send to the peer.
     vector<ReplicateRefPtr> messages;
@@ -710,6 +714,9 @@ Status PeerMessageQueue::RequestForPeer(const string& uuid,
             << Substitute("The logs necessary to catch up peer $0 have been "
                           "garbage collected. The follower will never be able "
                           "to catch up ($1)", uuid, s.ToString());
+        LOG(INFO) << Substitute("The logs necessary to catch up peer $0 have been "
+                                "garbage collected. The follower will never be able "
+                                "to catch up ($1)", uuid, s.ToString());
         wal_catchup_failure = true;
         return s;
       }
