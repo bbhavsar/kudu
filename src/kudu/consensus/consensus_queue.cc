@@ -29,6 +29,7 @@
 #include <boost/optional/optional.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <gflags/gflags.h>
+#include <google/protobuf/stubs/port.h>
 
 #include "kudu/common/common.pb.h"
 #include "kudu/common/timestamp.h"
