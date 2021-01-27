@@ -397,6 +397,28 @@ class DynamicMultiMasterTest : public KuduTest {
     return cluster_->AddMaster(new_master_);
   }
 
+  // Removes the specified master from the cluster using the CLI tool.
+  // Returns generic RuntimeError() on failure with the actual error in the optional 'err'
+  // output parameter.
+  Status RemoveMasterFromClusterUsingCLITool(const HostPort& master_to_remove,
+                                             const string& master_uuid = "",
+                                             string* err = nullptr) {
+    auto hps = cluster_->master_rpc_addrs();
+    vector<string> addresses;
+    addresses.reserve(hps.size());
+    for (const auto& hp : hps) {
+      addresses.emplace_back(hp.ToString());
+    }
+
+    vector<string> args = {"master", "remove_master", JoinStrings(addresses, ","),
+                           master_to_remove.ToString()};
+    if (!master_uuid.empty()) {
+      args.push_back("--master_uuid=" + master_uuid);
+    }
+    RETURN_NOT_OK(tools::RunKuduTool(args, nullptr, err));
+    return cluster_->RemoveMaster(master_to_remove);
+  }
+
   // Verify one of the 'expected_roles' and 'expected_member_type' of the new master by
   // making RPC to it directly.
   void VerifyNewMasterDirectly(const set<consensus::RaftPeerPB::Role>& expected_roles,
@@ -850,7 +872,7 @@ TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
 
   // Verify the master to be removed is part of the list of masters.
   ASSERT_NE(std::find(master_hps.begin(), master_hps.end(), master_to_remove), master_hps.end());
-  ASSERT_OK(RemoveMasterFromCluster(master_to_remove));
+  ASSERT_OK(RemoveMasterFromClusterUsingCLITool(master_to_remove, master_to_remove_uuid));
 
   // Verify we have one master less and the desired master was removed.
   vector<HostPort> updated_master_hps;
@@ -975,9 +997,10 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterFeatureFlagNotSpecified) {
   int leader_master_idx = -1;
   ASSERT_OK(cluster_->GetLeaderMasterIndex(&leader_master_idx));
   master_to_remove = cluster_->master(leader_master_idx)->bound_rpc_hostport();
-  s = RemoveMasterFromCluster(master_to_remove);
-  ASSERT_TRUE(s.IsRemoteError());
-  ASSERT_STR_MATCHES(s.ToString(), "unsupported feature flags");
+  string err;
+  s = RemoveMasterFromClusterUsingCLITool(master_to_remove, "", &err);
+  ASSERT_TRUE(s.IsRuntimeError()) << s.ToString();
+  ASSERT_STR_MATCHES(err, "Cluster does not support RemoveMaster");
 
   // Verify no change in number of masters.
   NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
