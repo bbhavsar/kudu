@@ -22,6 +22,7 @@
 #include <ostream>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -617,7 +618,7 @@ class ParameterizedAddMasterTest : public DynamicMultiMasterTest,
   }
 };
 
-INSTANTIATE_TEST_CASE_P(, ParameterizedAddMasterTest,
+INSTANTIATE_TEST_SUITE_P(, ParameterizedAddMasterTest,
                         // Initial number of masters in the cluster before adding a new master
                         ::testing::Values(1, 2));
 

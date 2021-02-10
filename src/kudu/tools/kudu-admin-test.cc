@@ -27,6 +27,7 @@
 #include <ostream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -460,8 +461,8 @@ TEST_P(MoveTabletParamTest, Test) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(EnableKudu1097AndDownTS, MoveTabletParamTest,
-                        ::testing::Combine(::testing::Values(Kudu1097::Disable,
+INSTANTIATE_TEST_SUITE_P(EnableKudu1097AndDownTS, MoveTabletParamTest,
+                         ::testing::Combine(::testing::Values(Kudu1097::Disable,
                                                              Kudu1097::Enable),
                                            ::testing::Values(DownTS::None,
                                                              DownTS::TabletPeer,
@@ -1539,8 +1540,8 @@ class TestLeaderStepDown :
     public AdminCliTest,
     public ::testing::WithParamInterface<LeaderStepDownMode> {
 };
-INSTANTIATE_TEST_CASE_P(, TestLeaderStepDown,
-                        ::testing::Values(LeaderStepDownMode::ABRUPT,
+INSTANTIATE_TEST_SUITE_P(, TestLeaderStepDown,
+                           ::testing::Values(LeaderStepDownMode::ABRUPT,
                                           LeaderStepDownMode::GRACEFUL));
 TEST_P(TestLeaderStepDown, TestLeaderStepDownWhenNotPresent) {
   FLAGS_num_tablet_servers = 3;

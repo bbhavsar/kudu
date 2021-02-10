@@ -27,6 +27,7 @@
 #include <ostream>
 #include <random>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -1525,8 +1526,8 @@ class ParameterizedBloomFilterPredicateTest :
     public PredicateTest,
     public ::testing::WithParamInterface<std::tuple<bool, bool>> {};
 
-INSTANTIATE_TEST_CASE_P(, ParameterizedBloomFilterPredicateTest,
-                        ::testing::Combine(::testing::Bool(),
+INSTANTIATE_TEST_SUITE_P(, ParameterizedBloomFilterPredicateTest,
+                           ::testing::Combine(::testing::Bool(),
                                            ::testing::Bool()));
 
 // Test to verify that an ineffective Bloom filter predicate will be disabled
@@ -1601,8 +1602,8 @@ TEST_P(ParameterizedBloomFilterPredicateTest, TestDisabledBloomFilterWithRepeate
 class ParameterizedPredicateTest : public PredicateTest,
   public ::testing::WithParamInterface<KuduColumnSchema::DataType> {};
 
-INSTANTIATE_TEST_CASE_P(, ParameterizedPredicateTest,
-                        ::testing::Values(KuduColumnSchema::STRING,
+INSTANTIATE_TEST_SUITE_P(, ParameterizedPredicateTest,
+                           ::testing::Values(KuduColumnSchema::STRING,
                                           KuduColumnSchema::BINARY,
                                           KuduColumnSchema::VARCHAR));
 

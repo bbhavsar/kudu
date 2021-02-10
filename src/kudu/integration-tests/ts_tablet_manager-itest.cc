@@ -296,7 +296,7 @@ TEST_P(FailedTabletsAreReplacedITest, OneReplica) {
   // Ensure the tablet eventually is replicated.
   NO_FATALS(v.CheckCluster());
 }
-INSTANTIATE_TEST_CASE_P(,
+INSTANTIATE_TEST_SUITE_P(,
                         FailedTabletsAreReplacedITest,
                         ::testing::Bool());
 

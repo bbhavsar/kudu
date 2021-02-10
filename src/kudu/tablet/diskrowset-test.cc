@@ -23,6 +23,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -735,8 +736,8 @@ class DiffScanRowSetTest : public KuduRowSetTest,
 // Tests the Cartesian product of two boolean parameters:
 // 1. Whether to include deleted rows in the scan.
 // 2. Whether to include the "is deleted" virtual column in the scan's projection.
-INSTANTIATE_TEST_CASE_P(RowIteratorOptionsPermutations, DiffScanRowSetTest,
-                        ::testing::Combine(::testing::Bool(),
+INSTANTIATE_TEST_SUITE_P(RowIteratorOptionsPermutations, DiffScanRowSetTest,
+                         ::testing::Combine(::testing::Bool(),
                                            ::testing::Bool()));
 
 // Tests diff scans on a diskrowset. The rowset is generated with only a handful

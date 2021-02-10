@@ -24,6 +24,7 @@
 #include <ostream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <gflags/gflags.h>
@@ -473,9 +474,9 @@ class TabletCopyClientAbortTest : public TabletCopyClientTest,
   void CreateTestBlocks(int num_blocks);
 };
 
-INSTANTIATE_TEST_CASE_P(BlockDeleteTriggers,
-                        TabletCopyClientAbortTest,
-                        ::testing::Combine(
+INSTANTIATE_TEST_SUITE_P(BlockDeleteTriggers,
+                         TabletCopyClientAbortTest,
+                         ::testing::Combine(
                             ::testing::Values(kDownloadBlocks, kNoDownloadBlocks),
                             ::testing::Values(kAbortMethod, kDestructor, kNoDelete)));
 

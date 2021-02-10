@@ -713,8 +713,8 @@ class ThreadPoolPerformanceTest :
     public ThreadPoolTest,
     public testing::WithParamInterface<bool> {
 };
-INSTANTIATE_TEST_CASE_P(LoadMeterPresence, ThreadPoolPerformanceTest,
-                        ::testing::Values(false, true));
+INSTANTIATE_TEST_SUITE_P(LoadMeterPresence, ThreadPoolPerformanceTest,
+                         ::testing::Values(false, true));
 
 // A scenario to assess ThreadPool's performance in the absence/presence
 // of the QueueLoadMeter. The scenario uses a mix of serial and concurrent
@@ -846,8 +846,8 @@ TEST_F(ThreadPoolTest, TestSlowDestructor) {
 class ThreadPoolTestTokenTypes : public ThreadPoolTest,
                                  public testing::WithParamInterface<ThreadPool::ExecutionMode> {};
 
-INSTANTIATE_TEST_CASE_P(Tokens, ThreadPoolTestTokenTypes,
-                        ::testing::Values(ThreadPool::ExecutionMode::SERIAL,
+INSTANTIATE_TEST_SUITE_P(Tokens, ThreadPoolTestTokenTypes,
+                         ::testing::Values(ThreadPool::ExecutionMode::SERIAL,
                                           ThreadPool::ExecutionMode::CONCURRENT));
 
 

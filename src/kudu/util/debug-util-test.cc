@@ -325,8 +325,8 @@ enum DangerousOp {
   MALLOC_AND_FREE
 };
 class RaceTest : public DebugUtilTest, public ::testing::WithParamInterface<DangerousOp> {};
-INSTANTIATE_TEST_CASE_P(DifferentRaces, RaceTest,
-                        ::testing::Values(DLOPEN_AND_CLOSE,
+INSTANTIATE_TEST_SUITE_P(DifferentRaces, RaceTest,
+                         ::testing::Values(DLOPEN_AND_CLOSE,
                                           DL_ITERATE_PHDR,
                                           GET_STACK_TRACE,
                                           MALLOC_AND_FREE));
