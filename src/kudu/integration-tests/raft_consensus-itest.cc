@@ -3070,10 +3070,7 @@ TEST_P(RaftConsensusParamReplicationModesITest, TestRestartWithDifferentUUID) {
 // Designating graceful leadership transfer to a follower that cannot catch up
 // should eventually fail.
 TEST_F(RaftConsensusITest, TestLeaderTransferWhenFollowerFallsBehindLeaderGC) {
-  if (!AllowSlowTests()) {
-    LOG(WARNING) << "test is skipped; set KUDU_ALLOW_SLOW_TESTS=1 to run";
-    return;
-  }
+  SKIP_IF_SLOW_NOT_ALLOWED();
   const auto kTimeout = MonoDelta::FromSeconds(30);
   vector<string> ts_flags = {
     // Disable follower eviction.
