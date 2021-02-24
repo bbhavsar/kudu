@@ -121,7 +121,6 @@ class DynamicMultiMasterTest : public KuduTest {
 
     ASSERT_OK(reserved_socket_->GetSocketAddress(&reserved_addr_));
     reserved_hp_ = HostPort(reserved_addr_);
-    reserved_hp_str_ = reserved_hp_.ToString();
   }
 
   void StartCluster(const vector<string>& extra_master_flags,
@@ -151,7 +150,7 @@ class DynamicMultiMasterTest : public KuduTest {
 
     // Verify that masters are running as VOTERs and collect their addresses to be used
     // for starting the new master.
-    NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, master_hps));
+    NO_FATALS(VerifyVoterMasters(orig_num_masters_, master_hps));
 
     // Function to fetch the GC count of the system catalog WAL.
     auto get_sys_catalog_wal_gc_count = [&] (int master_idx) {
@@ -267,26 +266,31 @@ class DynamicMultiMasterTest : public KuduTest {
     ASSERT_OK(RunLeaderMasterRPC(list_masters, cluster));
   }
 
-  // Verify the ExternalMiniCluster 'cluster' contains 'num_masters' and return the master
-  // addresses in 'master_hps'.
-  void VerifyNumMastersAndGetAddresses(int num_masters, vector<HostPort>* master_hps,
-                                       ExternalMiniCluster* cluster = nullptr) {
+  // Verify the ExternalMiniCluster 'cluster' contains 'num_masters' overall
+  // and are all VOTERS.
+  // Return master addresses in 'master_hps', if not nullptr.
+  void VerifyVoterMasters(int num_masters, vector<HostPort>* master_hps = nullptr,
+                          ExternalMiniCluster* cluster = nullptr) {
     ListMastersResponsePB resp;
     NO_FATALS(RunListMasters(&resp, cluster));
     ASSERT_EQ(num_masters, resp.masters_size());
-    master_hps->clear();
+    if (master_hps) master_hps->clear();
     for (const auto& master : resp.masters()) {
       ASSERT_TRUE(master.role() == consensus::RaftPeerPB::LEADER ||
                   master.role() == consensus::RaftPeerPB::FOLLOWER);
       ASSERT_EQ(consensus::RaftPeerPB::VOTER, master.member_type());
       ASSERT_EQ(1, master.registration().rpc_addresses_size());
-      master_hps->emplace_back(HostPortFromPB(master.registration().rpc_addresses(0)));
+      if (master_hps) {
+        master_hps->emplace_back(HostPortFromPB(master.registration().rpc_addresses(0)));
+      }
     }
   }
 
-  // Brings up a new master where 'master_hps' contains master addresses including
-  // the new master to be added.
+  // Brings up a new master 'new_master_hp' where 'master_hps' contains master addresses including
+  // the new master to be added at the index 'new_master_idx' in the ExternalMiniCluster.
   void StartNewMaster(const vector<HostPort>& master_hps,
+                      const HostPort& new_master_hp,
+                      int new_master_idx,
                       bool master_supports_change_config = true) {
     vector<string> master_addresses;
     master_addresses.reserve(master_hps.size());
@@ -296,23 +300,25 @@ class DynamicMultiMasterTest : public KuduTest {
 
     // Start with an existing master daemon's options, but modify them for use in a new master
     ExternalDaemonOptions new_master_opts = cluster_->master(0)->opts();
-    const string new_master_id = Substitute("master-$0", orig_num_masters_);
+    const string new_master_id = Substitute("master-$0", new_master_idx);
     new_master_opts.wal_dir = cluster_->GetWalPath(new_master_id);
     new_master_opts.data_dirs = cluster_->GetDataPaths(new_master_id);
     new_master_opts.log_dir = cluster_->GetLogPath(new_master_id);
-    new_master_opts.rpc_bind_address = reserved_hp_;
+    new_master_opts.rpc_bind_address = new_master_hp;
     auto& flags = new_master_opts.extra_flags;
     flags.insert(flags.end(),
                  {"--master_addresses=" + JoinStrings(master_addresses, ","),
-                  "--master_address_add_new_master=" + reserved_hp_str_});
+                  "--master_address_add_new_master=" + new_master_hp.ToString()});
 
-    LOG(INFO) << "Bringing up the new master at: " << reserved_hp_str_;
+    LOG(INFO) << "Bringing up the new master at: " << new_master_hp.ToString();
     new_master_.reset(new ExternalMaster(new_master_opts));
     ASSERT_OK(new_master_->Start());
     ASSERT_OK(new_master_->WaitForCatalogManager());
 
+    Sockaddr new_master_addr;
+    ASSERT_OK(SockaddrFromHostPort(new_master_hp, &new_master_addr));
     new_master_proxy_.reset(
-        new MasterServiceProxy(new_master_opts.messenger, reserved_addr_, reserved_addr_.host()));
+        new MasterServiceProxy(new_master_opts.messenger, new_master_addr, new_master_hp.host()));
     {
       GetMasterRegistrationRequestPB req;
       GetMasterRegistrationResponsePB resp;
@@ -330,11 +336,6 @@ class DynamicMultiMasterTest : public KuduTest {
         ASSERT_EQ(consensus::RaftPeerPB::FOLLOWER, resp.role());
       }
     }
-
-    // Verify the cluster still has the same number of masters.
-    ListMastersResponsePB resp;
-    NO_FATALS(RunListMasters(&resp));
-    ASSERT_EQ(orig_num_masters_, resp.masters_size());
   }
 
   // Fetch a follower (non-leader) master index from the cluster.
@@ -450,10 +451,10 @@ class DynamicMultiMasterTest : public KuduTest {
 
   // Verify the newly added master is in FAILED_UNRECOVERABLE state and can't be caught up
   // from WAL.
-  void VerifyNewMasterInFailedUnrecoverableState() {
+  void VerifyNewMasterInFailedUnrecoverableState(int expected_num_masters) {
     consensus::RaftConfigPB config;
     NO_FATALS(GetLeaderMasterConsensusState(&config));
-    ASSERT_EQ(orig_num_masters_ + 1, config.peers_size());
+    ASSERT_EQ(expected_num_masters, config.peers_size());
     int num_new_masters_found = 0;
     for (const auto& peer : config.peers()) {
       if (peer.permanent_uuid() == new_master_->uuid()) {
@@ -521,7 +522,8 @@ class DynamicMultiMasterTest : public KuduTest {
 
   // Verification steps after the new master has been added successfully and it's promoted
   // as VOTER. The supplied 'master_hps' includes the new_master as well.
-  void VerifyClusterAfterMasterAddition(const vector<HostPort>& master_hps) {
+  void VerifyClusterAfterMasterAddition(const vector<HostPort>& master_hps,
+                                        int expected_num_masters) {
     // Collect information about the cluster for verification later before shutting
     // it down.
     UnorderedHostPortSet master_hps_set(master_hps.begin(), master_hps.end());
@@ -541,7 +543,7 @@ class DynamicMultiMasterTest : public KuduTest {
     cluster_.reset();
 
     LOG(INFO) << "Bringing up the migrated cluster";
-    opts_.num_masters = orig_num_masters_ + 1;
+    opts_.num_masters = expected_num_masters;
     opts_.master_rpc_addresses = master_hps;
     ExternalMiniCluster migrated_cluster(opts_);
     ASSERT_OK(migrated_cluster.Start());
@@ -549,11 +551,11 @@ class DynamicMultiMasterTest : public KuduTest {
       ASSERT_OK(migrated_cluster.master(i)->WaitForCatalogManager());
     }
 
-    // Verify the cluster still has the same 3 masters.
+    // Verify the cluster still has the same masters.
     {
       ListMastersResponsePB resp;
       NO_FATALS(RunListMasters(&resp, &migrated_cluster));
-      ASSERT_EQ(orig_num_masters_ + 1, resp.masters_size());
+      ASSERT_EQ(expected_num_masters, resp.masters_size());
 
       UnorderedHostPortSet hps_found;
       unordered_set<string> uuids_found;
@@ -591,10 +593,10 @@ class DynamicMultiMasterTest : public KuduTest {
     // Pause one master at a time and create table at the same time which will allow
     // new leader to be elected if the paused master is a leader.
     // Need at least 3 masters to form consensus and elect a new leader.
-    if (orig_num_masters_ + 1 >= 3) {
+    if (expected_num_masters >= 3) {
       LOG(INFO) << "Pausing and resuming individual masters";
       string table_name = kTableName;
-      for (int i = 0; i < orig_num_masters_ + 1; i++) {
+      for (int i = 0; i < expected_num_masters; i++) {
         ASSERT_OK(migrated_cluster.master(i)->Pause());
         cluster::ScopedResumeExternalDaemon resume_daemon(migrated_cluster.master(i));
         NO_FATALS(cv.CheckRowCount(table_name, ClusterVerifier::EXACTLY, 0));
@@ -619,6 +621,125 @@ class DynamicMultiMasterTest : public KuduTest {
     }
   }
 
+  // Helper function for recovery tests that shuts down and deletes state of a follower master
+  // and removes it from the Raft configuration.
+  // Output parameters:
+  //   dead_master_idx: Index of the follower master selected for recovery in the
+  //                    ExternalMiniCluster
+  //   dead_master_hp: HostPort of the follower master selected for recovery
+  //   src_master_hp: HostPort of an existing master that can be used as a source for recovery
+  void FailAndRemoveFollowerMaster(const vector<HostPort>& master_hps, int* dead_master_idx,
+                                   HostPort* dead_master_hp, HostPort* src_master_hp) {
+    // We'll be selecting a follower master to be shutdown to simulate a dead master
+    // and to prevent the test from being flaky we disable master leadership change.
+    NO_FATALS(DisableMasterLeadershipTransfer());
+
+    int master_to_recover_idx = -1;
+    ASSERT_OK(GetFollowerMasterIndex(&master_to_recover_idx));
+    ASSERT_NE(master_to_recover_idx, -1);
+    scoped_refptr<ExternalMaster> master_to_recover(cluster_->master(master_to_recover_idx));
+    const auto master_to_recover_hp = master_to_recover->bound_rpc_hostport();
+
+    ASSERT_OK(CreateTable(cluster_.get(), kTableName));
+
+    LOG(INFO) << Substitute("Shutting down and deleting the state of the master to be recovered "
+                            "HostPort: $0, UUID: $1, index : $2", master_to_recover_hp.ToString(),
+                            master_to_recover->uuid(), master_to_recover_idx);
+
+    NO_FATALS(master_to_recover->Shutdown());
+    ASSERT_OK(master_to_recover->DeleteFromDisk());
+
+    LOG(INFO) << "Detecting transition to terminal FAILED state";
+    ASSERT_EVENTUALLY([&] {
+      VerifyDeadMasterInSpecifiedState(master_to_recover->uuid(),
+                                       consensus::HealthReportPB::FAILED);
+    });
+
+    // Verify the master to be removed is part of the list of masters.
+    ASSERT_NE(std::find(master_hps.begin(), master_hps.end(), master_to_recover_hp),
+              master_hps.end());
+
+    // Before removing the master set the output parameters as the master being removed
+    // will not be tracked by ExternalMiniCluster.
+    *dead_master_idx = master_to_recover_idx;
+    *dead_master_hp = master_to_recover_hp;
+    // Source master to copy system catalog out of at least 2 masters in the cluster.
+    // Recovery tests start with at least 2 masters.
+    ASSERT_GE(cluster_->num_masters(), 2);
+    int src_master_idx = master_to_recover_idx == 0 ? 1 : 0;
+    *src_master_hp = cluster_->master(src_master_idx)->bound_rpc_hostport();
+
+    ASSERT_OK(RemoveMasterFromClusterUsingCLITool(master_to_recover_hp));
+
+    // Verify we have one master less and the desired master was removed.
+    vector<HostPort> updated_master_hps;
+    NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1, &updated_master_hps));
+    UnorderedHostPortSet expected_master_hps(master_hps.begin(), master_hps.end());
+    expected_master_hps.erase(master_to_recover_hp);
+    UnorderedHostPortSet actual_master_hps(updated_master_hps.begin(), updated_master_hps.end());
+    ASSERT_EQ(expected_master_hps, actual_master_hps);
+
+    ClusterVerifier cv(cluster_.get());
+    NO_FATALS(cv.CheckCluster());
+    NO_FATALS(cv.CheckRowCount(kTableName, ClusterVerifier::EXACTLY, 0));
+  }
+
+  // Helper function that verifies that the newly added master can't be caught up from WAL
+  // and remains as NON_VOTER.
+  void VerifyNewNonVoterMaster(const HostPort& new_master_hp,
+                               int expected_num_masters) {
+    // Newly added master will be added to the master Raft config but won't be caught up
+    // from the WAL and hence remain as a NON_VOTER.
+    ListMastersResponsePB list_resp;
+    NO_FATALS(RunListMasters(&list_resp));
+    ASSERT_EQ(expected_num_masters, list_resp.masters_size());
+
+    for (const auto& master : list_resp.masters()) {
+      ASSERT_EQ(1, master.registration().rpc_addresses_size());
+      auto hp = HostPortFromPB(master.registration().rpc_addresses(0));
+      if (hp == new_master_hp) {
+        ASSERT_EQ(consensus::RaftPeerPB::NON_VOTER, master.member_type());
+        ASSERT_TRUE(master.role() == consensus::RaftPeerPB::LEARNER);
+      }
+    }
+
+    // Double check by directly contacting the new master.
+    NO_FATALS(VerifyNewMasterDirectly({ consensus::RaftPeerPB::LEARNER },
+                                      consensus::RaftPeerPB::NON_VOTER));
+
+    // Verify new master is in FAILED_UNRECOVERABLE state.
+    // This health state update may take some round trips between the masters and
+    // hence wrapping it under ASSERT_EVENTUALLY.
+    ASSERT_EVENTUALLY([&] {
+      NO_FATALS(VerifyNewMasterInFailedUnrecoverableState(expected_num_masters));
+    });
+  }
+
+  // Helper function to copy system catalog from 'src_master_hp' master.
+  void CopySystemCatalog(const HostPort& src_master_hp) {
+    LOG(INFO) << "Shutting down the new master";
+    new_master_->Shutdown();
+
+    LOG(INFO) << "Deleting the system catalog";
+    // Delete sys catalog on local master
+    ASSERT_OK(tools::RunKuduTool({"local_replica", "delete",
+                                  master::SysCatalogTable::kSysCatalogTabletId,
+                                  "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                  "-fs_wal_dir=" + new_master_->wal_dir(),
+                                  "-clean_unsafe"}));
+
+    // Copy from remote system catalog from specified master
+    LOG(INFO) << "Copying from remote master: " << src_master_hp.ToString();
+    ASSERT_OK(tools::RunKuduTool({"local_replica", "copy_from_remote",
+                                  master::SysCatalogTable::kSysCatalogTabletId,
+                                  src_master_hp.ToString(),
+                                  "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
+                                  "-fs_wal_dir=" + new_master_->wal_dir()}));
+
+    LOG(INFO) << "Restarting the new master";
+    ASSERT_OK(new_master_->Restart());
+  }
+
   // Tracks the current number of masters in the cluster
   int orig_num_masters_;
   ExternalMiniClusterOptions opts_;
@@ -628,7 +749,6 @@ class DynamicMultiMasterTest : public KuduTest {
   unique_ptr<Socket> reserved_socket_;
   Sockaddr reserved_addr_;
   HostPort reserved_hp_;
-  string reserved_hp_str_;
   unique_ptr<MasterServiceProxy> new_master_proxy_;
   scoped_refptr<ExternalMaster> new_master_;
 
@@ -661,13 +781,14 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterCatchupFromWAL) {
   // Verify that masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   ASSERT_OK(CreateTable(cluster_.get(), kTableName));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
   ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_, nullptr, 4));
 
   // Newly added master will be caught up from WAL itself without requiring tablet copy
@@ -675,20 +796,7 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterCatchupFromWAL) {
   // Catching up from WAL and promotion to VOTER will not be instant after adding the
   // new master. Hence using ASSERT_EVENTUALLY.
   ASSERT_EVENTUALLY([&] {
-    ListMastersResponsePB resp;
-    NO_FATALS(RunListMasters(&resp));
-    ASSERT_EQ(orig_num_masters_ + 1, resp.masters_size());
-
-    int num_leaders = 0;
-    for (const auto& master : resp.masters()) {
-      ASSERT_EQ(consensus::RaftPeerPB::VOTER, master.member_type());
-      ASSERT_TRUE(master.role() == consensus::RaftPeerPB::LEADER ||
-                  master.role() == consensus::RaftPeerPB::FOLLOWER);
-      if (master.role() == consensus::RaftPeerPB::LEADER) {
-        num_leaders++;
-      }
-    }
-    ASSERT_EQ(1, num_leaders);
+    VerifyVoterMasters(orig_num_masters_ + 1);
   });
 
   // Double check by directly contacting the new master.
@@ -710,7 +818,7 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterCatchupFromWAL) {
     ASSERT_STR_CONTAINS(err, "Master already present");
   }
 
-  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps));
+  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps, orig_num_masters_ + 1));
 }
 
 // This test goes through the workflow required to copy system catalog to the newly added master.
@@ -721,40 +829,20 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterSysCatalogCopy) {
   NO_FATALS(StartClusterWithSysCatalogGCed(
       &master_hps,
       {"--master_consensus_allow_status_msg_for_failed_peer"}));
+
   ASSERT_OK(CreateTable(cluster_.get(), kTableName));
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
   string err;
   ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_, &err));
   ASSERT_STR_MATCHES(err, Substitute("Please follow the next steps which includes system catalog "
                                      "tablet copy", reserved_hp_.ToString()));
 
   // Newly added master will be added to the master Raft config but won't be caught up
-  // from the WAL and hence remain as a NON_VOTER.
-  ListMastersResponsePB list_resp;
-  NO_FATALS(RunListMasters(&list_resp));
-  ASSERT_EQ(orig_num_masters_ + 1, list_resp.masters_size());
-
-  for (const auto& master : list_resp.masters()) {
-    ASSERT_EQ(1, master.registration().rpc_addresses_size());
-    auto hp = HostPortFromPB(master.registration().rpc_addresses(0));
-    if (hp == reserved_hp_) {
-      ASSERT_EQ(consensus::RaftPeerPB::NON_VOTER, master.member_type());
-      ASSERT_TRUE(master.role() == consensus::RaftPeerPB::LEARNER);
-    }
-  }
-
-  // Double check by directly contacting the new master.
-  NO_FATALS(VerifyNewMasterDirectly({ consensus::RaftPeerPB::LEARNER },
-                                    consensus::RaftPeerPB::NON_VOTER));
-
-  // Verify new master is in FAILED_UNRECOVERABLE state.
-  // This health state update may take some round trips between the masters and
-  // hence wrapping it under ASSERT_EVENTUALLY.
-  ASSERT_EVENTUALLY([&] {
-    NO_FATALS(VerifyNewMasterInFailedUnrecoverableState());
-  });
+  // from the WAL and hence remain as a NON_VOTER and transition to FAILED_UNRECOVERABLE state.
+  NO_FATALS(VerifyNewNonVoterMaster(reserved_hp_, orig_num_masters_ + 1));
 
   // Adding the same master again should print a message but not throw an error.
   {
@@ -772,54 +860,21 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterSysCatalogCopy) {
 
   // Without system catalog copy, the new master will remain in the FAILED_UNRECOVERABLE state.
   // So lets proceed with the tablet copy process for system catalog.
-  // Shutdown the new master
-  LOG(INFO) << "Shutting down the new master";
-  new_master_->Shutdown();
-
-  LOG(INFO) << "Deleting the system catalog";
-  // Delete sys catalog on local master
-  ASSERT_OK(tools::RunKuduTool({"local_replica", "delete",
-                                master::SysCatalogTable::kSysCatalogTabletId,
-                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
-                                "-fs_wal_dir=" + new_master_->wal_dir(),
-                                "-clean_unsafe"}));
-
-
-  // Copy from remote system catalog from any existing master.
-  LOG(INFO) << "Copying from remote master: "
-    << cluster_->master(0)->bound_rpc_hostport().ToString();
-  ASSERT_OK(tools::RunKuduTool({"local_replica", "copy_from_remote",
-                                master::SysCatalogTable::kSysCatalogTabletId,
-                                cluster_->master(0)->bound_rpc_hostport().ToString(),
-                                "-fs_data_dirs=" + JoinStrings(new_master_->data_dirs(), ","),
-                                "-fs_wal_dir=" + new_master_->wal_dir()}));
-
-  LOG(INFO) << "Restarting the new master";
-  ASSERT_OK(new_master_->Restart());
+  NO_FATALS(CopySystemCatalog(cluster_->master(0)->bound_rpc_hostport()));
 
   // Wait for the new master to be up and running and the leader master to send status only Raft
   // message to allow the new master to be considered caught up and promoted to be being a VOTER.
   ASSERT_EVENTUALLY([&] {
-    VerifyNewMasterDirectly({ consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
-                            consensus::RaftPeerPB::VOTER);
+    VerifyVoterMasters(orig_num_masters_ + 1);
   });
 
-  // Verify the same state from the leader master
-  NO_FATALS(RunListMasters(&list_resp));
-  ASSERT_EQ(orig_num_masters_ + 1, list_resp.masters_size());
+  // Verify the same state from the new master directly.
+  // Double check by directly contacting the new master.
+  NO_FATALS(VerifyNewMasterDirectly(
+      { consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
+      consensus::RaftPeerPB::VOTER));
 
-  for (const auto& master : list_resp.masters()) {
-    ASSERT_EQ(1, master.registration().rpc_addresses_size());
-    auto hp = HostPortFromPB(master.registration().rpc_addresses(0));
-    if (hp == reserved_hp_) {
-      ASSERT_EQ(new_master_->uuid(), master.instance_id().permanent_uuid());
-      ASSERT_EQ(consensus::RaftPeerPB::VOTER, master.member_type());
-      ASSERT_TRUE(master.role() == consensus::RaftPeerPB::FOLLOWER ||
-                  master.role() == consensus::RaftPeerPB::LEADER);
-    }
-  }
-
-  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps));
+  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps, orig_num_masters_ + 1));
 }
 
 class ParameterizedRemoveMasterTest : public DynamicMultiMasterTest,
@@ -830,12 +885,12 @@ class ParameterizedRemoveMasterTest : public DynamicMultiMasterTest,
   }
 };
 
-INSTANTIATE_TEST_CASE_P(, ParameterizedRemoveMasterTest,
-                        ::testing::Combine(
-                            // Initial number of masters in the cluster before removing a master
-                            ::testing::Values(2, 3),
-                            // Whether the master to be removed is dead/shutdown
-                            ::testing::Bool()));
+INSTANTIATE_TEST_SUITE_P(, ParameterizedRemoveMasterTest,
+                         ::testing::Combine(
+                             // Initial number of masters in the cluster before removing a master
+                             ::testing::Values(2, 3),
+                             // Whether the master to be removed is dead/shutdown
+                             ::testing::Bool()));
 
 // Tests removing a non-leader master from the cluster.
 TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
@@ -848,7 +903,7 @@ TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
 
   // Verify that existing masters are running as VOTERs.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // When an ExternalMiniCluster is restarted after removal of a master then one of the
   // remaining masters can get reassigned to the same wal dir which was previously assigned
@@ -892,7 +947,7 @@ TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
 
   // Verify we have one master less and the desired master was removed.
   vector<HostPort> updated_master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_ - 1, &updated_master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1, &updated_master_hps));
   UnorderedHostPortSet expected_master_hps(master_hps.begin(), master_hps.end());
   expected_master_hps.erase(master_to_remove);
   UnorderedHostPortSet actual_master_hps(updated_master_hps.begin(), updated_master_hps.end());
@@ -928,7 +983,7 @@ TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
   }
 
   vector<HostPort> migrated_master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_ - 1, &migrated_master_hps,
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1, &migrated_master_hps,
                                             &migrated_cluster));
   actual_master_hps.clear();
   actual_master_hps.insert(migrated_master_hps.begin(), migrated_master_hps.end());
@@ -937,6 +992,110 @@ TEST_P(ParameterizedRemoveMasterTest, TestRemoveMaster) {
   ClusterVerifier mcv(&migrated_cluster);
   NO_FATALS(mcv.CheckCluster());
   NO_FATALS(mcv.CheckRowCount(kTableName, ClusterVerifier::EXACTLY, 0));
+}
+
+class ParameterizedRecoverMasterTest : public DynamicMultiMasterTest,
+                                       public ::testing::WithParamInterface<int> {
+ public:
+  void SetUp() override {
+    NO_FATALS(SetUpWithNumMasters(GetParam()));
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(, ParameterizedRecoverMasterTest,
+                         // Number of masters in a cluster
+                         ::testing::Values(2, 3));
+
+// Tests recovering a dead master at the same HostPort without explicit system catalog copy
+TEST_P(ParameterizedRecoverMasterTest, TestRecoverDeadMasterCatchupfromWAL) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  NO_FATALS(StartCluster({"--master_support_change_config",
+                          // Keeping RPC timeouts short to quickly detect downed servers.
+                          // This will put the health status into an UNKNOWN state until the point
+                          // where they are considered FAILED.
+                          "--consensus_rpc_timeout_ms=2000",
+                          "--follower_unavailable_considered_failed_sec=4"}));
+
+  // Verify that existing masters are running as VOTERs.
+  vector<HostPort> master_hps;
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
+
+  int master_to_recover_idx = -1;
+  HostPort master_to_recover_hp;
+  HostPort src_master_hp;
+  NO_FATALS(FailAndRemoveFollowerMaster(master_hps, &master_to_recover_idx, &master_to_recover_hp,
+                                        &src_master_hp));
+
+  // Add new master at the same HostPort
+  NO_FATALS(StartNewMaster(master_hps, master_to_recover_hp, master_to_recover_idx));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1));
+  ASSERT_OK(AddMasterToClusterUsingCLITool(master_to_recover_hp));
+
+  // Newly added master will be caught up from WAL itself without requiring tablet copy
+  // since the system catalog is fresh with a single table.
+  // Catching up from WAL and promotion to VOTER will not be instant after adding the
+  // new master. Hence using ASSERT_EVENTUALLY.
+  ASSERT_EVENTUALLY([&] {
+    VerifyVoterMasters(orig_num_masters_);
+  });
+
+  // Double check by directly contacting the new master.
+  NO_FATALS(VerifyNewMasterDirectly(
+      { consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
+      consensus::RaftPeerPB::VOTER));
+
+  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps, orig_num_masters_));
+}
+
+// Tests recovering a dead master at the same HostPort with explicit system catalog copy
+TEST_P(ParameterizedRecoverMasterTest, TestRecoverDeadMasterSysCatalogCopy) {
+  SKIP_IF_SLOW_NOT_ALLOWED();
+
+  vector<HostPort> master_hps;
+  NO_FATALS(StartClusterWithSysCatalogGCed(
+      &master_hps,
+      {"--master_consensus_allow_status_msg_for_failed_peer",
+       // Keeping RPC timeouts short to quickly detect downed servers.
+       // This will put the health status into an UNKNOWN state until the point
+       // where they are considered FAILED.
+       "--consensus_rpc_timeout_ms=2000",
+       "--follower_unavailable_considered_failed_sec=4"}));
+
+  // Verify that existing masters are running as VOTERs.
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
+
+  int master_to_recover_idx = -1;
+  HostPort master_to_recover_hp;
+  HostPort src_master_hp;
+  NO_FATALS(FailAndRemoveFollowerMaster(master_hps, &master_to_recover_idx, &master_to_recover_hp,
+                                        &src_master_hp));
+
+  // Add new master at the same HostPort
+  NO_FATALS(StartNewMaster(master_hps, master_to_recover_hp, master_to_recover_idx));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1));
+  string err;
+  ASSERT_OK(AddMasterToClusterUsingCLITool(master_to_recover_hp, &err));
+  ASSERT_STR_MATCHES(err, Substitute("Please follow the next steps which includes system catalog "
+                                     "tablet copy", reserved_hp_.ToString()));
+
+  // Verify the new master will remain as NON_VOTER and transition to FAILED_UNRECOVERABLE state.
+  NO_FATALS(VerifyNewNonVoterMaster(master_to_recover_hp, orig_num_masters_));
+
+  // Without system catalog copy, the new master will remain in the FAILED_UNRECOVERABLE state.
+  // So lets proceed with the tablet copy process for system catalog.
+  NO_FATALS(CopySystemCatalog(src_master_hp));
+
+  // Wait for the new master to be up and running and the leader master to send status only Raft
+  // message to allow the new master to be considered caught up and promoted to be being a VOTER.
+  ASSERT_EVENTUALLY([&] {
+    VerifyVoterMasters(orig_num_masters_);
+  });
+
+  VerifyNewMasterDirectly({ consensus::RaftPeerPB::FOLLOWER, consensus::RaftPeerPB::LEADER },
+                          consensus::RaftPeerPB::VOTER);
+
+  NO_FATALS(VerifyClusterAfterMasterAddition(master_hps, orig_num_masters_));
 }
 
 // Test that brings up a single master cluster with 'last_known_addr' not populated by
@@ -950,11 +1109,12 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterWithNoLastKnownAddr) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 
   string err;
   Status actual = AddMasterToClusterUsingCLITool(reserved_hp_, &err);
@@ -962,7 +1122,7 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterWithNoLastKnownAddr) {
   ASSERT_STR_MATCHES(err, "Invalid config to set as pending: Peer:.* has no address");
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 }
 
 // Test that attempts to add a new master without enabling the feature flag for master Raft
@@ -974,11 +1134,13 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterFeatureFlagNotSpecified) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps, false /* master_supports_change_config */));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_,
+                           false /* master_supports_change_config */));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 
   string err;
   Status actual = AddMasterToClusterUsingCLITool(reserved_hp_, &err);
@@ -986,7 +1148,7 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterFeatureFlagNotSpecified) {
   ASSERT_STR_MATCHES(err, "Cluster does not support AddMaster");
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 }
 
 // Test that attempts to remove an existing master without enabling the feature flag for master
@@ -997,7 +1159,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterFeatureFlagNotSpecified) {
 
   // Verify that existing masters are running as VOTERs.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Try removing non-leader master.
   {
@@ -1022,7 +1184,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterFeatureFlagNotSpecified) {
   }
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 }
 
 // Test that attempts to request a non-leader master to add a new master.
@@ -1033,11 +1195,12 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterToNonLeader) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 
   // Verify sending add master request to a non-leader master returns NOT_THE_LEADER error.
   // It's possible there is a leadership change between querying for leader master and
@@ -1059,7 +1222,7 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterToNonLeader) {
   });
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 }
 
 // Test that attempts to request a non-leader master to remove a master.
@@ -1070,7 +1233,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterToNonLeader) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // In test below we use the master RPC directly to the non-leader master and a retry
   // will have unintended consequences hence disabling master leadership transfer.
@@ -1094,7 +1257,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterToNonLeader) {
   ASSERT_EQ(MasterErrorPB::NOT_THE_LEADER, resp.error().code());
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 }
 
 // Test that attempts to add a master with missing master address and a non-routable incorrect
@@ -1106,11 +1269,12 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterMissingAndIncorrectAddress) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Bring up the new master and add to the cluster.
   master_hps.emplace_back(reserved_hp_);
-  NO_FATALS(StartNewMaster(master_hps));
+  NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_));
 
   // Empty HostPort
   {
@@ -1131,7 +1295,7 @@ TEST_F(DynamicMultiMasterTest, TestAddMasterMissingAndIncorrectAddress) {
   }
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 }
 
 // Test that attempts to remove a master with missing master address and a non-existent
@@ -1142,7 +1306,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterMissingAndIncorrectHostname) {
 
   // Verify that existing masters are running as VOTERs.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Empty HostPort.
   {
@@ -1162,7 +1326,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterMissingAndIncorrectHostname) {
   }
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 }
 
 // Test that attempts to remove a master with mismatching hostname and uuid.
@@ -1172,7 +1336,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterMismatchHostnameAndUuid) {
 
   // Verify that existing masters are running as VOTERs.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // Master leadership transfer could result in a different error and hence disabling it.
   NO_FATALS(DisableMasterLeadershipTransfer());
@@ -1193,7 +1357,7 @@ TEST_F(DynamicMultiMasterTest, TestRemoveMasterMismatchHostnameAndUuid) {
                                  cluster_->master(non_leader_idx)->uuid(), random_uuid));
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 }
 
 // Test that attempts removing a leader master itself from a cluster with
@@ -1206,7 +1370,7 @@ class ParameterizedRemoveLeaderMasterTest : public DynamicMultiMasterTest,
   }
 };
 
-INSTANTIATE_TEST_CASE_P(, ParameterizedRemoveLeaderMasterTest, ::testing::Values(1, 2));
+INSTANTIATE_TEST_SUITE_P(, ParameterizedRemoveLeaderMasterTest, ::testing::Values(1, 2));
 
 TEST_P(ParameterizedRemoveLeaderMasterTest, TestRemoveLeaderMaster) {
   NO_FATALS(StartCluster({"--master_support_change_config"}));
@@ -1214,7 +1378,7 @@ TEST_P(ParameterizedRemoveLeaderMasterTest, TestRemoveLeaderMaster) {
   // Verify that existing masters are running as VOTERs and collect their addresses to be used
   // for starting the new master.
   vector<HostPort> master_hps;
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 
   // In test below a retry in case of master leadership transfer will have unintended
   // consequences and hence disabling master leadership transfer.
@@ -1236,7 +1400,7 @@ TEST_P(ParameterizedRemoveLeaderMasterTest, TestRemoveLeaderMaster) {
   }
 
   // Verify no change in number of masters.
-  NO_FATALS(VerifyNumMastersAndGetAddresses(orig_num_masters_, &master_hps));
+  NO_FATALS(VerifyVoterMasters(orig_num_masters_, &master_hps));
 }
 
 } // namespace master
