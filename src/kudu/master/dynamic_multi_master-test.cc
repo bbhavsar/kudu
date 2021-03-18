@@ -798,7 +798,10 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterCatchupFromWAL) {
   master_hps.emplace_back(reserved_hp_);
   NO_FATALS(StartNewMaster(master_hps, reserved_hp_, orig_num_masters_));
   NO_FATALS(VerifyVoterMasters(orig_num_masters_));
-  ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_, nullptr, 4));
+  string err;
+  ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_, &err, 4));
+  ASSERT_STR_MATCHES(err, Substitute("Master $0 successfully caught up from WAL",
+                                     reserved_hp_.ToString()));
 
   // Newly added master will be caught up from WAL itself without requiring tablet copy
   // since the system catalog is fresh with a single table.
@@ -843,9 +846,9 @@ TEST_P(ParameterizedAddMasterTest, TestAddMasterSysCatalogCopy) {
   NO_FATALS(VerifyVoterMasters(orig_num_masters_));
   string err;
   ASSERT_OK(AddMasterToClusterUsingCLITool(reserved_hp_, &err));
-  ASSERT_STR_MATCHES(err, Substitute("New master $0 part of the Raft configuration.*"
-                                     "Please follow the next steps which includes system catalog "
-                                     "tablet copy", reserved_hp_.ToString()));
+  ASSERT_STR_MATCHES(err, Substitute("Master $0 could not be caught up from WAL. Please follow the "
+                                     "next steps which includes system catalog tablet copy",
+                                     reserved_hp_.ToString()));
 
   // Newly added master will be added to the master Raft config but won't be caught up
   // from the WAL and hence remain as a NON_VOTER and transition to FAILED_UNRECOVERABLE state.
@@ -1038,7 +1041,10 @@ TEST_P(ParameterizedRecoverMasterTest, TestRecoverDeadMasterCatchupfromWAL) {
   // Add new master at the same HostPort
   NO_FATALS(StartNewMaster(master_hps, master_to_recover_hp, master_to_recover_idx));
   NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1));
-  ASSERT_OK(AddMasterToClusterUsingCLITool(master_to_recover_hp));
+  string err;
+  ASSERT_OK(AddMasterToClusterUsingCLITool(master_to_recover_hp, &err));
+  ASSERT_STR_MATCHES(err, Substitute("Master $0 successfully caught up from WAL",
+                                     master_to_recover_hp.ToString()));
 
   // Newly added master will be caught up from WAL itself without requiring tablet copy
   // since the system catalog is fresh with a single table.
@@ -1084,9 +1090,9 @@ TEST_P(ParameterizedRecoverMasterTest, TestRecoverDeadMasterSysCatalogCopy) {
   NO_FATALS(VerifyVoterMasters(orig_num_masters_ - 1));
   string err;
   ASSERT_OK(AddMasterToClusterUsingCLITool(master_to_recover_hp, &err));
-  ASSERT_STR_MATCHES(err, Substitute("New master $0 part of the Raft configuration.*"
-                                     "Please follow the next steps which includes system catalog "
-                                     "tablet copy", master_to_recover_hp.ToString()));
+  ASSERT_STR_MATCHES(err, Substitute("Master $0 could not be caught up from WAL. Please follow the "
+                                     "next steps which includes system catalog tablet copy",
+                                     master_to_recover_hp.ToString()));
 
   // Verify the new master will remain as NON_VOTER and transition to FAILED_UNRECOVERABLE state.
   NO_FATALS(VerifyNewNonVoterMaster(master_to_recover_hp, orig_num_masters_));

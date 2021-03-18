@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <fstream> // IWYU pragma: keep
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -47,6 +48,8 @@
 #include "kudu/master/master_runner.h"
 #include "kudu/rpc/response_callback.h"
 #include "kudu/rpc/rpc_controller.h"
+#include "kudu/tools/ksck.h"
+#include "kudu/tools/ksck_remote.h"
 #include "kudu/tools/tool_action.h"
 #include "kudu/tools/tool_action_common.h"
 #include "kudu/util/init.h"
@@ -127,6 +130,19 @@ Status MasterTimestamp(const RunnerContext& context) {
   return PrintServerTimestamp(address, Master::kDefaultPort);
 }
 
+Status CheckMasterHealthAndConsensus(const vector<string>& master_addresses) {
+  std::shared_ptr<KsckCluster> cluster;
+  RETURN_NOT_OK(RemoteKsckCluster::Build(master_addresses, &cluster));
+
+  // Print to an unopened ofstream to discard ksck output.
+  // See https://stackoverflow.com/questions/8243743.
+  std::ofstream null_stream;
+  Ksck ksck(cluster, &null_stream);
+  RETURN_NOT_OK(ksck.CheckMasterHealth());
+  RETURN_NOT_OK(ksck.CheckMasterConsensus());
+  return Status::OK();
+}
+
 Status AddMasterChangeConfig(const RunnerContext& context) {
   const string& new_master_address = FindOrDie(context.required_args, kMasterAddressArg);
 
@@ -152,30 +168,40 @@ Status AddMasterChangeConfig(const RunnerContext& context) {
       return s;
     }
     if (master_already_present) {
-      LOG(INFO) << "Master already present. Checking for promotion to VOTER...";
+      LOG(INFO) << "Master already present.";
     }
+    LOG(INFO) << Substitute("Successfully added master $0 to the Raft configuration.",
+                            hp.ToString());
   }
 
   // If the system catalog of the new master can be caught up from the WAL then the new master will
-  // be promoted to a VOTER and become a FOLLOWER. However this can take some time, so we'll
+  // transition to FAILED_UNRECOVERABLE state. However this can take some time, so we'll
   // try for a few seconds. It's perfectly normal for the new master to be not caught up from
   // the WAL in which case subsequent steps of system catalog tablet copy need to be carried out
   // as outlined in the documentation for adding a new master to Kudu cluster.
-  MonoTime deadline = MonoTime::Now() + MonoDelta::FromSeconds(FLAGS_wait_secs);
+  LOG(INFO) << "Checking for master consensus and health status...";
+  vector<string> master_addresses;
+  CHECK_OK(ParseMasterAddresses(context, &master_addresses));
+  // It's possible this is a retry in which case the new master is already part of master_addresses.
+  if (std::find(master_addresses.begin(), master_addresses.end(), hp.ToString()) ==
+      master_addresses.end()) {
+    master_addresses.emplace_back(hp.ToString());
+  }
   RaftPeerPB::Role master_role = RaftPeerPB::UNKNOWN_ROLE;
   RaftPeerPB::MemberType master_type = RaftPeerPB::UNKNOWN_MEMBER_TYPE;
+  Status master_ksck_status = Status::OK();
+  MonoTime deadline = MonoTime::Now() + MonoDelta::FromSeconds(FLAGS_wait_secs);
   do {
     ListMastersRequestPB req;
     ListMastersResponsePB resp;
     RETURN_NOT_OK((proxy.SyncRpc<ListMastersRequestPB, ListMastersResponsePB>(
-                   req, &resp, "ListMasters", &MasterServiceProxy::ListMastersAsync)));
-
+        req, &resp, "ListMasters", &MasterServiceProxy::ListMastersAsync)));
     if (resp.has_error()) {
       return StatusFromPB(resp.error().status());
     }
 
-    int i = 0;
     bool new_master_found = false;
+    int i = 0;
     for (; i < resp.masters_size(); i++) {
       const auto& master = resp.masters(i);
       if (master.has_error()) {
@@ -204,21 +230,29 @@ Status AddMasterChangeConfig(const RunnerContext& context) {
     master_type = master.member_type();
     if (master_type == RaftPeerPB::VOTER &&
         (master_role == RaftPeerPB::FOLLOWER || master_role == RaftPeerPB::LEADER)) {
-      LOG(INFO) << Substitute("Successfully added master $0 to the cluster. Please follow the "
-                              "next steps which includes updating master addresses, updating "
-                              "client configuration etc. from the Kudu administration "
-                              "documentation on \"Migrating to Multiple Kudu Masters\".",
-                              hp.ToString());
-      return Status::OK();
+      // Check the master ksck state as well.
+      master_ksck_status = CheckMasterHealthAndConsensus(master_addresses);
+      if (master_ksck_status.ok()) {
+        LOG(INFO) << Substitute("Master $0 successfully caught up from WAL. Please follow the next "
+                                "steps which includes updating master addresses, updating client "
+                                "configuration etc. from the Kudu administration documentation on "
+                                "\"Migrating to Multiple Kudu Masters\".",
+                                hp.ToString());
+        return Status::OK();
+      }
     }
     SleepFor(MonoDelta::FromMilliseconds(100));
   } while (MonoTime::Now() < deadline);
 
-  LOG(INFO) << Substitute("New master $0 part of the Raft configuration; role: $1, member_type: "
-                          "$2. Please follow the next steps which includes system catalog tablet "
-                          "copy, updating master addresses etc. from the Kudu administration "
-                          "documentation on \"Migrating to Multiple Kudu Masters\".",
-                          hp.ToString(), master_role, master_type);
+  LOG(INFO) << Substitute("Master $0 status; role: $1, member_type: $2, ksck_status: $3",
+                          hp.ToString(), RaftPeerPB::Role_Name(master_role),
+                          RaftPeerPB::MemberType_Name(master_type), master_ksck_status.ToString());
+
+  LOG(INFO) << Substitute("Master $0 could not be caught up from WAL. Please follow the next steps "
+                          "which includes system catalog tablet copy, updating master addresses "
+                          "etc. from the Kudu administration documentation on "
+                          "\"Migrating to Multiple Kudu Masters\".",
+                          hp.ToString());
   return Status::OK();
 }
 
